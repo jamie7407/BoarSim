@@ -54,15 +54,41 @@ public class NetworkRobotSync : NetworkBehaviour
 
         if (IsOwner)
         {
-            // This is our robot — full simulation runs as normal.
             EnableLocalSimulation(true);
+
+            // Remote clients never ran LoadMatch.SetupInputsWhenReady, so they
+            // need to bind a device to their PlayerInput here.
+            if (!IsServerInitialized)
+                AutoConfigureInput();
         }
         else
         {
-            // Remote robot — disable local physics driver; NetworkTransform
-            // will move it via interpolation from the owning client's state.
+            // Disable physics on non-owned robots — NetworkTransform drives them.
             EnableLocalSimulation(false);
+
+            // Hide cameras that belong to other players' robots so each client
+            // only sees through their own robot's camera.
+            DisableCameras();
         }
+    }
+
+    /// <summary>Pairs the first available gamepad (or keyboard) to this robot's PlayerInput.</summary>
+    private void AutoConfigureInput()
+    {
+        var playerInput = GetComponent<PlayerInput>();
+        if (playerInput == null) return;
+
+        var gamepads = Gamepad.all;
+        if (gamepads.Count > 0)
+            playerInput.SwitchCurrentControlScheme("Gamepad", gamepads[0]);
+        else if (Keyboard.current != null)
+            playerInput.SwitchCurrentControlScheme("Keyboard", Keyboard.current);
+    }
+
+    private void DisableCameras()
+    {
+        foreach (var cam in GetComponentsInChildren<Camera>(true))
+            cam.gameObject.SetActive(false);
     }
 
     // ── Server-side init helpers called by the spawning code ──────────────────
