@@ -69,11 +69,7 @@ namespace Network
         /// <summary>Join a remote host at the given IP address.</summary>
         public void StartClient(string address)
         {
-            // Tugboat (default FishNet UDP transport) exposes SetClientAddress.
-            // If you switch transports, update this cast.
-            if (_nm.TransportManager.Transport is Tugboat tugboat)
-                tugboat.SetClientAddress(address);
-
+            _nm.TransportManager.Transport.SetClientAddress(address);
             _nm.ClientManager.StartConnection();
         }
 

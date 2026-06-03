@@ -24,14 +24,9 @@ using UnityEngine.InputSystem;
 /// </summary>
 public class NetworkRobotSync : NetworkBehaviour
 {
-    // ── Synced cosmetic state ─────────────────────────────────────────────────
-    // Robot name shown in the floating tag above each robot.
-    [SyncVar(OnChange = nameof(OnRobotNameChanged))]
-    private string _robotName = "";
-
-    // Alliance side — drives bumper colour on remote clients.
-    [SyncVar(OnChange = nameof(OnIsRedChanged))]
-    private bool _isRed;
+    // ── Synced cosmetic state (FishNet 4.x SyncVar<T>) ───────────────────────
+    private readonly SyncVar<string> _robotName = new SyncVar<string>();
+    private readonly SyncVar<bool>   _isRed     = new SyncVar<bool>();
 
     // ── References (cached on Start) ─────────────────────────────────────────
     private SwerveController _swerve;
@@ -41,6 +36,13 @@ public class NetworkRobotSync : NetworkBehaviour
     // ── Lifecycle ─────────────────────────────────────────────────────────────
     private void Awake()
     {
+        _robotName.OnChange += (prev, next, asServer) => gameObject.name = next;
+        _isRed.OnChange     += (prev, next, asServer) =>
+        {
+            var frame = GetComponent<BuildFrame>();
+            // bumper colour re-apply handled by LoadMatch on the owning client
+        };
+
         _swerve      = GetComponent<SwerveController>();
         _playerInput = GetComponent<PlayerInput>();
         _rb          = GetComponent<Rigidbody>();
@@ -72,23 +74,8 @@ public class NetworkRobotSync : NetworkBehaviour
     [Server]
     public void InitialiseRobot(string robotName, bool isRed)
     {
-        _robotName = robotName;
-        _isRed     = isRed;
-    }
-
-    // ── SyncVar callbacks ──────────────────────────────────────────────────────
-    private void OnRobotNameChanged(string prev, string next, bool asServer)
-    {
-        gameObject.name = next;
-    }
-
-    private void OnIsRedChanged(bool prev, bool next, bool asServer)
-    {
-        // Re-apply bumper colour on remote clients when the value arrives.
-        var frame = GetComponent<BuildFrame>();
-        if (frame == null) return;
-        // ApplyBumperColor is private — access through the public helper if available,
-        // or duplicate the colour logic here once LoadMatch is refactored.
+        _robotName.Value = robotName;
+        _isRed.Value     = isRed;
     }
 
     // ── Owner input gate ───────────────────────────────────────────────────────
