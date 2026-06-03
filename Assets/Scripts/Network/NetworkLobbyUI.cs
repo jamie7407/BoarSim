@@ -149,7 +149,7 @@ public class NetworkLobbyUI : MonoBehaviour
         _addressField = AddInputField(_panel.transform, "IP Address / hostname", "localhost");
 
         // Status line
-        _statusLabel = AddLabel(_panel.transform, "Offline", Color.gray);
+        _statusLabel = AddLabel(_panel.transform, "Offline", 13, Color.gray);
 
         // Button row
         var row = new GameObject("Buttons");

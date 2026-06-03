@@ -29,10 +29,10 @@ namespace Network
         public static event System.Action OnDisconnected;
 
         // ── State ──────────────────────────────────────────────────────────────
-        public bool IsOnline  => _nm != null && (_nm.IsServer || _nm.IsClient);
-        public bool IsHost    => _nm != null && _nm.IsHost;
-        public bool IsServer  => _nm != null && _nm.IsServer;
-        public bool IsClient  => _nm != null && _nm.IsClient;
+        public bool IsOnline  => _nm != null && (_nm.IsServerStarted || _nm.IsClientStarted);
+        public bool IsHost    => _nm != null && _nm.IsHostStarted;
+        public bool IsServer  => _nm != null && _nm.IsServerStarted;
+        public bool IsClient  => _nm != null && _nm.IsClientStarted;
 
         // ── Lifecycle ──────────────────────────────────────────────────────────
         private void Awake()
@@ -80,8 +80,8 @@ namespace Network
         /// <summary>Stop all connections gracefully.</summary>
         public void Disconnect()
         {
-            if (_nm.IsServer) _nm.ServerManager.StopConnection();
-            if (_nm.IsClient) _nm.ClientManager.StopConnection();
+            if (_nm.IsServerStarted) _nm.ServerManager.StopConnection(true);
+            if (_nm.IsClientStarted) _nm.ClientManager.StopConnection();
         }
 
         // ── Callbacks ──────────────────────────────────────────────────────────
