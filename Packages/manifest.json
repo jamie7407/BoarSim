@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "com.firstgeargames.fishnet": "https://github.com/FirstGearGames/FishNet.git#4.3.9R",
     "com.domybest.mybox": "https://github.com/Deadcows/MyBox.git",
     "com.unity.collab-proxy": "2.6.0",
     "com.unity.feature.development": "1.0.2",
