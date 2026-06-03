@@ -98,9 +98,11 @@ public class ModuleBehaviour : MonoBehaviour
             for (int ni = 0; ni < normCount; ni++)
                 dotSum += normals[ni].y;
             float rawGrip = Mathf.Clamp01(dotSum / normCount);
-            // Square the factor: grip drops much faster as slope steepens.
-            // 45° face: 0.71 → 0.50,  60° face: 0.50 → 0.25 — robot carries momentum through.
-            slopeGrip = rawGrip * rawGrip;
+            // Exponent 1.5 instead of 2: gentler slopes (bump driving) keep more grip,
+            // steep faces still lose grip significantly so the robot carries momentum over.
+            // 20° slope: 0.94 → 0.91  (was 0.88)   drive-able
+            // 45° face:  0.71 → 0.60  (was 0.50)   still slides/launches
+            slopeGrip = Mathf.Pow(rawGrip, 1.5f);
         }
 
         float maxGrip = _rb.mass * 9.81f * 1.1f * slopeGrip;

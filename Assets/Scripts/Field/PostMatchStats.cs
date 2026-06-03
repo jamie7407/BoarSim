@@ -53,6 +53,12 @@ public class PostMatchStats : MonoBehaviour
         new GameObject("PostMatchStats").AddComponent<PostMatchStats>();
     }
 
+    // ── Per-robot score tracking [slot 0-3][phase: 0=auto 1=teleop 2=endgame] ──
+    private static readonly int[,] _slotScores = new int[4, 3];
+
+    public static int GetSlotScore(int slot, int phase) =>
+        (slot >= 0 && slot < 4) ? _slotScores[slot, phase] : 0;
+
     private void Awake()
     {
         Instance = this;
@@ -66,9 +72,28 @@ public class PostMatchStats : MonoBehaviour
         RedScoreAtEndgame  = 0;
         _statsRecorded     = false;
         _lastState         = MatchState.auto;
+        System.Array.Clear(_slotScores, 0, _slotScores.Length);
     }
 
-    private void OnEnable() => ResetForNewMatch();
+    private void OnEnable()
+    {
+        ResetForNewMatch();
+        FieldScorer.OnPieceScored += OnPieceScoredEvent;
+    }
+
+    private void OnDisable() => FieldScorer.OnPieceScored -= OnPieceScoredEvent;
+
+    private static void OnPieceScoredEvent(int slot, int points)
+    {
+        if (slot < 0 || slot >= 4) return;
+        int phase = FMS.MatchState switch
+        {
+            MatchState.auto     => 0,
+            MatchState.endgame  => 2,
+            _                   => 1,
+        };
+        _slotScores[slot, phase] += points;
+    }
 
     private void Update()
     {
@@ -128,11 +153,38 @@ public class PostMatchStats : MonoBehaviour
         int blueCount = BlueRobotCount(settings.playMode);
         int redCount  = RedRobotCount(settings.playMode);
 
-        // Slot 0 = Blue P1, Slot 1 = Blue P2, Slot 2 = Red P1, Slot 3 = Red P2
-        UpdateSlotEPA(0, BlueAuto, BlueTeleop, BlueEndgame, blueCount);
-        if (blueCount >= 2) UpdateSlotEPA(1, BlueAuto, BlueTeleop, BlueEndgame, blueCount);
-        if (redCount  >= 1) UpdateSlotEPA(2, RedAuto,  RedTeleop,  RedEndgame,  redCount);
-        if (redCount  >= 2) UpdateSlotEPA(3, RedAuto,  RedTeleop,  RedEndgame,  redCount);
+        // Use per-robot tracked scores when available (pieces fired through ReleaseToWorld).
+        // Fall back to equal alliance split for slots with no tracked data (e.g. non-piece scoring).
+        for (int slot = 0; slot < 4; slot++)
+        {
+            bool isBlue = slot < 2;
+            int  count  = isBlue ? blueCount : redCount;
+            if (count == 0) continue;
+            if (!isBlue && slot - 2 >= redCount) continue;
+
+            int trackedTotal = _slotScores[slot, 0] + _slotScores[slot, 1] + _slotScores[slot, 2];
+            int slotAuto, slotTeleop, slotEndgame;
+
+            if (trackedTotal > 0)
+            {
+                // Actual per-robot data available
+                slotAuto    = _slotScores[slot, 0];
+                slotTeleop  = _slotScores[slot, 1];
+                slotEndgame = _slotScores[slot, 2];
+            }
+            else
+            {
+                // No piece events fired for this slot — equal split of alliance total
+                int a = isBlue ? BlueAuto    : RedAuto;
+                int t = isBlue ? BlueTeleop  : RedTeleop;
+                int e = isBlue ? BlueEndgame : RedEndgame;
+                slotAuto    = a / count;
+                slotTeleop  = t / count;
+                slotEndgame = e / count;
+            }
+
+            UpdateSlotEPA(slot, slotAuto, slotTeleop, slotEndgame, 1);
+        }
 
         PlayerPrefs.Save();
     }

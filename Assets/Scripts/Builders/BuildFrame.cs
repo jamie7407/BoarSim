@@ -122,7 +122,7 @@ public class BuildFrame : MonoBehaviour
             rb.collisionDetectionMode = CollisionDetectionMode.Discrete;
             rb.interpolation = RigidbodyInterpolation.None;
             rb.mass = robotWeight;
-            rb.drag = 0.5f;
+            rb.drag = 0f;
             rb.angularDrag = 0.05f;
             _swerve.rb = rb;
             _swerve.gearRatio = gearRatio;
