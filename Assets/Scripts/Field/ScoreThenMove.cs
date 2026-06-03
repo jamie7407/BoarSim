@@ -35,6 +35,8 @@ public class ScoreThenMove : FieldScorer
             {
                 buffer.Enqueue(occupyObjects[i]);
                 bufferSet.Add(occupyObjects[i]);
+                bool auto = FMS.MatchState == MatchState.auto;
+                FireOnPieceScored(occupyObjects[i].lastScoredBySlot, auto ? autoScoreToAdd : scoreToAdd);
             }
         }
 

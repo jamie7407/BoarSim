@@ -112,6 +112,23 @@ namespace BuilderLib
             return true;
         }
     
+        // Cached to avoid FindFirstObjectByType on every release
+        private static LoadMatch _loadMatchCache;
+
+        private static int ResolveRobotSlot(Transform ownerTransform)
+        {
+            if (ownerTransform == null) return -1;
+            // owner is a node inside the robot; walk up to find the robot root
+            var swerve = ownerTransform.GetComponentInParent<SwerveController>();
+            if (swerve == null) return -1;
+            if (_loadMatchCache == null)
+                _loadMatchCache = Object.FindFirstObjectByType<LoadMatch>();
+            if (_loadMatchCache == null) return -1;
+            for (int i = 0; i < 4; i++)
+                if (_loadMatchCache.GetRobotLoaded(i) == swerve.gameObject) return i;
+            return -1;
+        }
+
         public static bool ReleaseToWorld(GamePiece piece, NodeAction action)
         {
             if (!piece) return false;
@@ -121,6 +138,9 @@ namespace BuilderLib
             action.overideSpeed = null;
             var rb = piece.rb;
             var transform = rb.transform;
+
+            // Capture which robot fired this piece before we clear owner
+            piece.lastScoredBySlot = ResolveRobotSlot(piece.owner);
 
             rb.velocity = Vector3.zero;
             piece.transform.localPosition = Vector3.zero;
@@ -143,13 +163,11 @@ namespace BuilderLib
             }
             rb.velocity = velocity;
             rb.angularVelocity = transform.TransformDirection(action.Spin);
-        
-            piece.state = GamePieceState.World;
 
+            piece.state = GamePieceState.World;
             piece.transform.parent = piece.originalParent;
-            
             piece.owner = null;
-        
+
             return true;
         }
 

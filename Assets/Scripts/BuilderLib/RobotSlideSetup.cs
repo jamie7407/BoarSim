@@ -22,8 +22,8 @@ public class RobotSlideSetup : MonoBehaviour
         if (_slideMat == null)
             _slideMat = new PhysicMaterial("RobotSlide")
             {
-                dynamicFriction = 0.1f,
-                staticFriction  = 0.1f,
+                dynamicFriction = 0.05f,
+                staticFriction  = 0.05f,
                 frictionCombine = PhysicMaterialCombine.Minimum,
                 bounciness      = 0f,
                 bounceCombine   = PhysicMaterialCombine.Minimum,

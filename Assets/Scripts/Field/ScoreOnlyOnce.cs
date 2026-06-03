@@ -37,7 +37,12 @@ public class ScoreOnlyOnce : FieldScorer
             if (!scoredPieces.Contains(piece.gameObject))
             {
                 scoredPieces.Add(piece.gameObject);
-                if (shouldScore) totalScore++;
+                if (shouldScore)
+                {
+                    totalScore++;
+                    bool auto = FMS.MatchState == MatchState.auto;
+                    FireOnPieceScored(piece.lastScoredBySlot, auto ? autoScoreToAdd : scoreToAdd);
+                }
             }
         }
 

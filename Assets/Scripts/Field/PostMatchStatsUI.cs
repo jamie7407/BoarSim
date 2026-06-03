@@ -77,7 +77,7 @@ public static class PostMatchStatsUI
         // ── Blue alliance section ─────────────────────────────────────────────
         string[] blueRobotNames = GetRobotNames(loadMatch, settings, true, blueCount);
         AddAllianceSection(panel.transform, "Blue Alliance", BlueAlliance,
-                           blueRobotNames,
+                           blueRobotNames, true,
                            PostMatchStats.BlueAuto,
                            PostMatchStats.BlueTeleop,
                            PostMatchStats.BlueEndgame,
@@ -90,7 +90,7 @@ public static class PostMatchStatsUI
             AddSpacer(panel.transform, 6);
             string[] redRobotNames = GetRobotNames(loadMatch, settings, false, redCount);
             AddAllianceSection(panel.transform, "Red Alliance", RedAlliance,
-                               redRobotNames,
+                               redRobotNames, false,
                                PostMatchStats.RedAuto,
                                PostMatchStats.RedTeleop,
                                PostMatchStats.RedEndgame,
@@ -120,7 +120,7 @@ public static class PostMatchStatsUI
     // ── Alliance section ──────────────────────────────────────────────────────
 
     private static void AddAllianceSection(Transform parent, string title, Color allianceColor,
-        string[] robotNames, int autoScore, int teleopScore, int endgameScore, int total, int count)
+        string[] robotNames, bool isBlue, int autoScore, int teleopScore, int endgameScore, int total, int count)
     {
         // Section header
         var header = CreatePanel(parent, "SectionHeader", new Color(allianceColor.r * 0.3f,
@@ -134,14 +134,22 @@ public static class PostMatchStatsUI
         AddTableRow(parent, HeaderBg, allianceColor,
                     "Player", "Auto", "Teleop", "Endgame", "Total", bold: true);
 
-        // Per-robot rows (equal-split estimate)
+        // Per-robot rows — actual tracked scores when available, equal split otherwise
+        int baseSlot = isBlue ? 0 : 2;
         for (int i = 0; i < count; i++)
         {
-            string name   = robotNames != null && i < robotNames.Length ? robotNames[i] : $"Robot {i + 1}";
-            string auto   = FormatSplit(autoScore,    count);
-            string teleop = FormatSplit(teleopScore,  count);
-            string end    = FormatSplit(endgameScore, count);
-            string tot    = FormatSplit(total,        count);
+            int slot = baseSlot + i;
+            string name = robotNames != null && i < robotNames.Length ? robotNames[i] : $"Robot {i + 1}";
+
+            int ta = PostMatchStats.GetSlotScore(slot, 0);
+            int tt = PostMatchStats.GetSlotScore(slot, 1);
+            int te = PostMatchStats.GetSlotScore(slot, 2);
+            bool hasTracked = ta + tt + te > 0;
+
+            string auto   = hasTracked ? ta.ToString()              : FormatSplit(autoScore,    count);
+            string teleop = hasTracked ? tt.ToString()              : FormatSplit(teleopScore,  count);
+            string end    = hasTracked ? te.ToString()              : FormatSplit(endgameScore, count);
+            string tot    = hasTracked ? (ta+tt+te).ToString()      : FormatSplit(total,        count);
             AddTableRow(parent, i % 2 == 0 ? RowNormal : RowAlt,
                         Color.white, name, auto, teleop, end, tot);
         }

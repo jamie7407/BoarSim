@@ -11,8 +11,8 @@ public class FieldScorer : MonoBehaviour
     [Tooltip("this will display a blue box around the scoring node when in the editor")]
     [SerializeField] private bool displayDebugBox = false;
     [SerializeField] private bool isBlue;
-    [SerializeField] private int scoreToAdd;
-    [SerializeField] private int autoScoreToAdd;
+    [SerializeField] protected int scoreToAdd;
+    [SerializeField] protected int autoScoreToAdd;
     [SerializeField] protected PieceNames[] scorePieces;
     private readonly HashSet<PieceNames> scorePiecesSet = new HashSet<PieceNames>();
     [SerializeField] private Collider[] occupyColliders;
@@ -21,7 +21,14 @@ public class FieldScorer : MonoBehaviour
     protected List<GamePiece> occupyObjects = new List<GamePiece>();
     private List<GamePiece> pieces = new List<GamePiece>();
     private LayerMask peiceMask;
-    private readonly Collider[] _overlapBuffer = new Collider[64];
+    private readonly Collider[] _overlapBuffer = new Collider[128];
+
+    /// <summary>
+    /// Fired whenever a new piece scores. Arguments: robot slot (0-3, or -1 if unknown), points added.
+    /// Used by PostMatchStats for per-robot EPA tracking.
+    /// </summary>
+    public static event System.Action<int, int> OnPieceScored;
+    protected static void FireOnPieceScored(int slot, int points) => OnPieceScored?.Invoke(slot, points);
 
     private int lastAddedPoints;
 

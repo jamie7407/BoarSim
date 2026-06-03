@@ -12,6 +12,8 @@ public class GamePiece : MonoBehaviour
     [HideInInspector] public Vector3 startPosition;
     [HideInInspector] public Transform originalParent;
     [HideInInspector] public float startingDistance;
+    // Robot slot (0-3) that last fired this piece into the world; -1 = unknown/spawned
+    [HideInInspector] public int lastScoredBySlot = -1;
 
     private bool hasId;
 
