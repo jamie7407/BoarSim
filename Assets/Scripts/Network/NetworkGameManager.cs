@@ -80,8 +80,8 @@ namespace Network
         /// <summary>Stop all connections gracefully.</summary>
         public void Disconnect()
         {
-            if (_nm.IsServer) _nm.ServerManager.StopConnection(true);
-            if (_nm.IsClient) _nm.ClientManager.StopConnection(false);
+            if (_nm.IsServer) _nm.ServerManager.StopConnection();
+            if (_nm.IsClient) _nm.ClientManager.StopConnection();
         }
 
         // ── Callbacks ──────────────────────────────────────────────────────────
