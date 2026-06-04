@@ -8236,6 +8236,7 @@ MonoBehaviour:
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 5772462908995940579}
     Direction: 0
@@ -8244,6 +8245,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &1199797954638927361
@@ -9365,6 +9367,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -9373,12 +9376,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 9
     KeyboardButton: 33
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 418697282052331712}
     Direction: 0
@@ -9387,6 +9392,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &1308308347434089135
@@ -9614,6 +9620,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -9622,6 +9629,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &1323966458054628777
@@ -12316,6 +12324,7 @@ MonoBehaviour:
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 3374220256746466119}
     Direction: 0
@@ -12324,6 +12333,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &1691293432207000916
@@ -22112,6 +22122,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -22120,12 +22131,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 3462506200268546319}
     Direction: 0
@@ -22134,6 +22147,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &3159258006067687941
@@ -22247,6 +22261,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -22255,12 +22270,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 9
     KeyboardButton: 33
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 1753539610560328556}
     Direction: 0
@@ -22269,6 +22286,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &3174000850350166190
@@ -29404,6 +29422,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -29412,12 +29431,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 9
     KeyboardButton: 33
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 4731423628291053858}
     Direction: 0
@@ -29426,6 +29447,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &4314609050685059820
@@ -34919,6 +34941,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -34927,6 +34950,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &5097494064460461680
@@ -38367,6 +38391,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 260
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -38375,6 +38400,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!114 &4326690763568308427
@@ -38531,6 +38557,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 260
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -38539,6 +38566,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!114 &7648142710374696024
@@ -41492,9 +41520,10 @@ MonoBehaviour:
   heightOffset: -4.3
   angleOffset: 0
   interpolationTable: []
-  xBounds: {x: -8, y: -4}
-  leftZBounds: {x: -3.5, y: 0}
-  rightZBounds: {x: 0, y: 3.5}
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
+  goToHome: 0
 --- !u!114 &380658904548194069
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -41520,9 +41549,10 @@ MonoBehaviour:
   heightOffset: 0
   angleOffset: 0
   interpolationTable: []
-  xBounds: {x: -8, y: -4}
-  leftZBounds: {x: -3.5, y: 0}
-  rightZBounds: {x: 0, y: 3.5}
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
+  goToHome: 0
 --- !u!114 &5935474537539157630
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -41548,9 +41578,10 @@ MonoBehaviour:
   heightOffset: 0
   angleOffset: 0
   interpolationTable: []
-  xBounds: {x: -8, y: -4}
-  leftZBounds: {x: -3.5, y: 0}
-  rightZBounds: {x: 0, y: 3.5}
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
+  goToHome: 0
 --- !u!1 &5958367507085715576
 GameObject:
   m_ObjectHideFlags: 0
@@ -43621,6 +43652,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -43629,12 +43661,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 7435056993433213341}
     Direction: 0
@@ -43643,6 +43677,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &6257918528836469330
@@ -46967,6 +47002,9 @@ GameObject:
   - component: {fileID: 5139585983875409665}
   - component: {fileID: 5922587625792903011}
   - component: {fileID: 8719325182581722938}
+  - component: {fileID: 9203461234718452851}
+  - component: {fileID: -1452106012530990199}
+  - component: {fileID: 238241060101582617}
   m_Layer: 0
   m_Name: Poofs
   m_TagString: Untagged
@@ -47048,6 +47086,9 @@ MonoBehaviour:
     i: 0
     d: 0.005
     max: 1
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
   Distance: 0
   Output: 0
   CurrentAngle: 0
@@ -47083,6 +47124,9 @@ MonoBehaviour:
     i: 0
     d: 0.005
     max: 1
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
   Distance: 0
   Output: 0
   CurrentAngle: 0
@@ -47118,10 +47162,131 @@ MonoBehaviour:
     i: 0
     d: 0.005
     max: 1
+  requireInsideRegion: 0
+  positionReference: {fileID: 0}
+  allowedRegions: 
   Distance: 0
   Output: 0
   CurrentAngle: 0
   TargetAngle: 0
+--- !u!114 &9203461234718452851
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6768931512802334942}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 26b716c41e9b56b4baafaf13a523ba2e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  <IsNested>k__BackingField: 0
+  WasActiveDuringEdit: 0
+  WasActiveDuringEdit_Set1: 1
+  <ComponentIndex>k__BackingField: 0
+  <PredictedSpawn>k__BackingField: {fileID: 0}
+  <PredictedOwner>k__BackingField: {fileID: 0}
+  NetworkBehaviours: []
+  InitializedParentNetworkBehaviour: {fileID: 0}
+  InitializedNestedNetworkObjects: []
+  RuntimeParentNetworkBehaviour: {fileID: 0}
+  RuntimeChildNetworkBehaviours: []
+  _isNetworked: 1
+  _isSpawnable: 1
+  _isGlobal: 0
+  _initializeOrder: 0
+  _preventDespawnOnDisconnect: 0
+  _defaultDespawnType: 0
+  _initializedTimestamp: 0
+  _localLevelOfDetailCalculationType: 0
+  _useLevelOfDetail: 0
+  _useRootLevelOfDetail: 1
+  NetworkObserver: {fileID: 0}
+  _enablePrediction: 0
+  _predictionType: 0
+  _localReconcileCorrectionType: 2
+  _graphicalObject: {fileID: 0}
+  _detachGraphicalObject: 0
+  _enableStateForwarding: 1
+  _networkTransform: {fileID: 0}
+  _ownerInterpolation: 1
+  _ownerSmoothedProperties: 255
+  _adaptiveInterpolation: 3
+  _spectatorSmoothedProperties: 255
+  _spectatorInterpolation: 2
+  _enableTeleport: 0
+  _teleportThreshold: 1
+  <PrefabId>k__BackingField: 65535
+  <SpawnableCollectionId>k__BackingField: 0
+  <AssetPathHash>k__BackingField: 3539819892083863382
+  SceneId: 0
+  SerializedTransformProperties:
+    Position: {x: 0, y: 0, z: 0}
+    Rotation: {x: 0, y: 0, z: 0, w: 0}
+    Scale: {x: 0, y: 0, z: 0}
+    IsValid: 0
+--- !u!114 &-1452106012530990199
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6768931512802334942}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a2836e36774ca1c4bbbee976e17b649c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _componentIndexCache: 255
+  _addedNetworkObject: {fileID: 9203461234718452851}
+  _networkObjectCache: {fileID: 0}
+  _componentConfiguration: 0
+  _synchronizeParent: 0
+  _packing:
+    Position: 1
+    Rotation: 1
+    Scale: 0
+  _useScaledTime: 1
+  _interpolation: 2
+  _extrapolation: 2
+  _enableTeleport: 0
+  _teleportThreshold: 1
+  _clientAuthoritative: 1
+  _sendToOwner: 1
+  _interval: 1
+  _synchronizePosition: 1
+  _positionSensitivity: 0.001
+  _positionSnapping:
+    X: 0
+    Y: 0
+    Z: 0
+  _synchronizeRotation: 1
+  _rotationSnapping:
+    X: 0
+    Y: 0
+    Z: 0
+  _synchronizeScale: 1
+  _scaleSensitivity: 0.001
+  _scaleSnapping:
+    X: 0
+    Y: 0
+    Z: 0
+--- !u!114 &238241060101582617
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6768931512802334942}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5fdd599482b907e428b49cd0af1b4aa9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _componentIndexCache: 255
+  _addedNetworkObject: {fileID: 9203461234718452851}
+  _networkObjectCache: {fileID: 0}
 --- !u!1 &6778624174755944659
 GameObject:
   m_ObjectHideFlags: 0
@@ -47970,6 +48135,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 260
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -47978,6 +48144,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!114 &4362262373329036814
@@ -48760,6 +48927,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -48768,6 +48936,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &6950583525070459941
@@ -49647,6 +49816,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -49655,12 +49825,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 6040581751103539128}
     Direction: 0
@@ -49669,6 +49841,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &7079304179373918036
@@ -50441,6 +50614,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 260
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -50449,6 +50623,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!114 &6423802468817956587
@@ -51226,6 +51401,7 @@ MonoBehaviour:
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 7548878634689713316}
     Direction: 0
@@ -51234,6 +51410,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &7298245998340244285
@@ -51799,6 +51976,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -51807,12 +51985,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 9
     KeyboardButton: 33
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 3217180797293043915}
     Direction: 0
@@ -51821,6 +52001,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &7354105127188454867
@@ -53309,6 +53490,7 @@ MonoBehaviour:
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 7364155829134519786}
     Direction: 0
@@ -53317,6 +53499,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &7573919630551095250
@@ -53717,6 +53900,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -53725,6 +53909,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &7635733734727570300
@@ -55167,6 +55352,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -55175,12 +55361,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 5943102158913973515}
     Direction: 0
@@ -55189,6 +55377,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 8
     KeyboardButton: 29
 --- !u!1 &7825228159732962536
@@ -57664,6 +57853,7 @@ MonoBehaviour:
     Type: 2
     Animate: 0
     Speed: 260
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -57672,6 +57862,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!114 &5487547010193366376
@@ -61495,6 +61686,7 @@ MonoBehaviour:
     Type: 0
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 0}
     Direction: 0
@@ -61503,12 +61695,14 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 0
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 9
     KeyboardButton: 33
   - Name: Transfer
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 7926623053615674308}
     Direction: 0
@@ -61517,6 +61711,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &8741789199553274152
@@ -63070,6 +63265,7 @@ MonoBehaviour:
     Type: 1
     Animate: 0
     Speed: 0
+    HpRandomizer: 25
     AngularSpeed: 0
     MoveTo: {fileID: 2786318345737934974}
     Direction: 0
@@ -63078,6 +63274,7 @@ MonoBehaviour:
     PieceType: 2
     ControlType: 2
     performTimer: 0
+    InputRequired: 1
     ControllerButton: 0
     KeyboardButton: 0
 --- !u!1 &9062002547043970044
