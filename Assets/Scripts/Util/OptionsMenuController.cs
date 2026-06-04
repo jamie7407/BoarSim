@@ -166,7 +166,28 @@ namespace Util
                 return;
             }
 
-            StartCoroutine(OpenMenuOnStartWithFadeRoutine());
+            Debug.Log($"[Menu] Start() running. menuRoot={menuRoot?.name}");
+            menuRoot.SetActive(true);
+            Debug.Log($"[Menu] After SetActive(true): activeInHierarchy={menuRoot.activeInHierarchy}");
+            _isOpen = true;
+            _isTransitioning = false;
+            if (unlockCursorWhenOpen) { Cursor.lockState = CursorLockMode.None; Cursor.visible = true; }
+            StartCoroutine(DeferredMenuSetup());
+        }
+
+        private IEnumerator DeferredMenuSetup()
+        {
+            yield return null; // wait one frame for everything to initialize
+            try
+            {
+                LoadDynamicData();
+                _workingSettings = loadMatch.GetSettingsCopy();
+                ApplySettingsToUI(true);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[OptionsMenuController] DeferredMenuSetup failed: {e.Message}");
+            }
         }
 
         private void Update()
@@ -358,6 +379,14 @@ namespace Util
         private IEnumerator OpenMenuOnStartWithFadeRoutine()
         {
             if (screenFader == null)
+            {
+                OpenMenuImmediate();
+                yield break;
+            }
+
+            // Open immediately if ScreenFader isn't ready yet (e.g. BlackFade starts inside
+            // an inactive parent so Awake hasn't run and _canvasGroup is null).
+            if (!screenFader.IsReady)
             {
                 OpenMenuImmediate();
                 yield break;

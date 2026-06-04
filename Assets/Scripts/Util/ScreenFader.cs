@@ -22,8 +22,14 @@ namespace Util
             _canvasGroup.blocksRaycasts = false;
         }
 
+        /// <summary>True once Awake has run and _canvasGroup is initialized.</summary>
+        public bool IsReady => _canvasGroup != null;
+
         public void SetBlackImmediate(bool black)
         {
+            if (_canvasGroup == null)
+                _canvasGroup = GetComponent<CanvasGroup>();
+
             if (_transitionCoroutine != null)
             {
                 StopCoroutine(_transitionCoroutine);

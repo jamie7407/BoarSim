@@ -84,7 +84,10 @@ namespace Network
         private void OnServerState(ServerConnectionStateArgs args)
         {
             if (args.ConnectionState == LocalConnectionState.Started)
+            {
+                NetworkSlotManager.Instance?.OnServerStarted();
                 OnHostStarted?.Invoke();
+            }
             else if (args.ConnectionState == LocalConnectionState.Stopped)
                 OnDisconnected?.Invoke();
         }
