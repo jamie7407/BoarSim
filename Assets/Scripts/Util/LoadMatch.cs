@@ -1120,6 +1120,11 @@ public class LoadMatch : MonoBehaviour
     // GameNetworkManager waits for this before overriding device assignments.
     public bool IsInputReady => _inputSetupCoroutine == null;
 
+    // Incremented by every ResetField() call.
+    // GameNetworkManager uses this to detect a new setup cycle even when IsInputReady
+    // stays true (coroutine completes in the same frame as StartCoroutine).
+    public int SetupVersion => _setupVersion;
+
     // ── MODIFIED: returns all four robots ─────────────────────────────────
     public GameObject[] GetLoadedRobots()
     {

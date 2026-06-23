@@ -49,6 +49,25 @@ public class JointController : MonoBehaviour
     private bool OverideActive;
     private string _activeSetpointName;
 
+    // Network override: set by GameNetworkManager when the client forwards its button
+    // presses to the host via SendRobotActionsServerRpc.  _netTriggered is one-shot
+    // (cleared after each Update), _netHeld stays until the bit is cleared.
+    private bool[] _netTriggered;
+    private bool[] _netHeld;
+
+    public void SetNetworkInput(int spIdx, bool triggered, bool held)
+    {
+        if (setPoints == null || setPoints.Length == 0) return;
+        if (_netTriggered == null || _netTriggered.Length != setPoints.Length)
+        {
+            _netTriggered = new bool[setPoints.Length];
+            _netHeld      = new bool[setPoints.Length];
+        }
+        if (spIdx < 0 || spIdx >= setPoints.Length) return;
+        if (triggered) _netTriggered[spIdx] = true; // accumulate: one-shot, cleared after Update
+        _netHeld[spIdx] = held;                      // direct set: reflects current state from host
+    }
+
     [HideInInspector] public float p;
     [HideInInspector] public float i;
     [HideInInspector] public float d;
@@ -157,11 +176,21 @@ public class JointController : MonoBehaviour
                 }
             }
             
-            var controllerHeld = controllerAction.IsPressed() && 
+            var controllerHeld = controllerAction.IsPressed() &&
                                  (controllerAction.activeControl?.device is Gamepad);
-            var keyboardHeld = keyboardAction.IsPressed() && 
+            var keyboardHeld = keyboardAction.IsPressed() &&
                                (keyboardAction.activeControl?.device is Keyboard);
             var buttonHeld = controllerHeld || keyboardHeld;
+
+            // OR in network-forwarded inputs from the client (host-side only).
+            // _netTriggered is one-shot (cleared here); _netHeld persists until the
+            // next SendRobotActionsServerRpc update resets it (always sent each poll).
+            if (_netTriggered != null && i < _netTriggered.Length)
+            {
+                buttonPressed |= _netTriggered[i];
+                buttonHeld    |= _netHeld[i];
+                _netTriggered[i] = false;
+            }
 
             //I dont even know and I just finished.
             switch (setPoint.controlType)

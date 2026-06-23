@@ -1,14 +1,17 @@
 using System;
 using System.Collections;
+using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using PlayMode = Util.PlayMode;
 
 // Single NetworkObject that handles:
-//   - Robot transform sync   (ClientRpc at ~20 Hz)
-//   - Client input routing   (unreliable ServerRpc)
-//   - FMS state sync         (NetworkVariables)
+//   - Robot root transform sync   (ClientRpc at ~20 Hz)
+//   - Robot joint transform sync  (CustomMessage MSG_JOINT_SYNC at ~20 Hz)
+//   - Client drivetrain input     (unreliable ServerRpc)
+//   - Client mechanism input      (ServerRpc — JointController button states)
+//   - FMS state / score sync      (NetworkVariables)
 //
 // Supports 1v1 and 2v2:
 //   1v1  — host controls slot 0 (blue), client controls slot 1 (red)
@@ -25,6 +28,8 @@ public class GameNetworkManager : NetworkBehaviour
 
     [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz fixed rate)")]
     [SerializeField] private int robotSyncEveryNFixed = 3;
+
+    private const string MSG_JOINT_SYNC = "BoarSim.JointSync";
 
     // FMS state — server writes, clients read
     private readonly NetworkVariable<float> _netMatchTimer = new(
@@ -47,9 +52,10 @@ public class GameNetworkManager : NetworkBehaviour
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
 
-    // Tracks whether we've applied role config for the current set of loaded robots.
-    // Resets to false when robots are destroyed (field reset) so we re-apply next load.
-    private bool _roleApplied;
+    // Tracks the LoadMatch.SetupVersion for which we last applied role config.
+    // Using version instead of a bool means a new ResetField() always triggers
+    // re-application even when the setup coroutine completes in the same frame.
+    private int _lastAppliedSetupVersion = -1;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -84,12 +90,16 @@ public class GameNetworkManager : NetworkBehaviour
 
         if (IsClient && !IsHost)
         {
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(
+                MSG_JOINT_SYNC, OnJointSyncReceived);
+
             StartCoroutine(InputSendLoop());
+
             // Re-apply role config if the host publishes the play mode after
-            // we've already run (e.g. mode was still default when robots loaded).
+            // we've already applied (e.g. mode was still default when robots loaded).
             _netPlayMode.OnValueChanged += (_, _) =>
             {
-                if (_roleApplied && _loadMatch != null)
+                if (_lastAppliedSetupVersion >= 0 && _loadMatch != null)
                     ApplyRoleToLoadedMatch();
             };
         }
@@ -99,6 +109,9 @@ public class GameNetworkManager : NetworkBehaviour
     {
         if (IsServer)
             NetworkManager.OnClientConnectedCallback -= OnClientConnected;
+
+        if (IsClient && !IsHost)
+            NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_JOINT_SYNC);
     }
 
     // Called on the host whenever a new client joins.
@@ -128,17 +141,17 @@ public class GameNetworkManager : NetworkBehaviour
 
         // Wait for IsInputReady (PairInputs done) before applying role config —
         // otherwise SetupInputsWhenReady finishes after us and overwrites our bindings.
+        // We track SetupVersion rather than a simple bool so that a new ResetField()
+        // always triggers re-application even when the setup coroutine completes in
+        // the same frame and IsInputReady never momentarily becomes false.
         if (_loadMatch != null)
         {
             bool robotsReady = _loadMatch.GetRobotLoaded(0) != null && _loadMatch.IsInputReady;
-            if (robotsReady && !_roleApplied)
+            int  version     = _loadMatch.SetupVersion;
+            if (robotsReady && version != _lastAppliedSetupVersion)
             {
-                _roleApplied = true;
+                _lastAppliedSetupVersion = version;
                 ApplyRoleToLoadedMatch();
-            }
-            else if (!robotsReady)
-            {
-                _roleApplied = false;
             }
         }
     }
@@ -171,6 +184,29 @@ public class GameNetworkManager : NetworkBehaviour
             // from _netPlayMode, which may not have propagated from the host yet at this point.
             var mode = (PlayMode)_loadMatch.GetSettingsCopy().playMode;
             _loadMatch.RebindForNetworkPlay(false, mode);
+
+            // Make all child Rigidbodies kinematic on the client so the host-authoritative
+            // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
+            MakeChildRigidbodiesKinematic();
+        }
+    }
+
+    // Sets every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
+    // Called on the client after role config is applied.  The root Rigidbody is already
+    // handled by RebindForNetworkPlay; we only need the joint children here.
+    private void MakeChildRigidbodiesKinematic()
+    {
+        for (int slot = 0; slot < 4; slot++)
+        {
+            var robot = _loadMatch.GetRobotLoaded(slot);
+            if (robot == null) continue;
+            var rootRb = robot.GetComponent<Rigidbody>();
+            foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
+            {
+                if (rb == rootRb) continue;
+                if (rb.GetComponent<GamePiece>() != null) continue;
+                rb.isKinematic = true;
+            }
         }
     }
 
@@ -185,7 +221,33 @@ public class GameNetworkManager : NetworkBehaviour
         robot.GetComponent<SwerveController>()?.overideInputs(tx, ty, rx, disruptable: false);
     }
 
-    // ── Server: broadcast all robot transforms to clients ────────────────────
+    // Server: apply client mechanism button presses to JointControllers.
+    // triggeredMask / heldMask pack one bit per setpoint across all JointControllers
+    // in GetComponentsInChildren order (same prefab hierarchy → same order on both machines).
+    [ServerRpc(RequireOwnership = false)]
+    public void SendRobotActionsServerRpc(int slot, ulong triggeredMask, ulong heldMask)
+    {
+        if (_loadMatch == null) return;
+        var robot = _loadMatch.GetRobotLoaded(slot);
+        if (robot == null) return;
+
+        var joints = robot.GetComponentsInChildren<JointController>();
+        int bit = 0;
+        foreach (var jc in joints)
+        {
+            if (jc.setPoints == null) continue;
+            for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
+            {
+                bool triggered = ((triggeredMask >> bit) & 1UL) != 0;
+                bool held      = ((heldMask      >> bit) & 1UL) != 0;
+                // Always call SetNetworkInput so held=false clears the held state
+                // on the JointController when the button is released.
+                jc.SetNetworkInput(sp, triggered, held);
+            }
+        }
+    }
+
+    // ── Server: broadcast all robot transforms + joint positions to clients ────
 
     private void FixedUpdate()
     {
@@ -202,6 +264,8 @@ public class GameNetworkManager : NetworkBehaviour
             GetRobotPos(2), GetRobotRot(2), GetRobotVel(2),
             GetRobotPos(3), GetRobotRot(3), GetRobotVel(3)
         );
+
+        SendJointSync();
     }
 
     private Vector3    GetRobotPos(int s) { var r = _loadMatch.GetRobotLoaded(s); return r != null ? r.transform.position : Vector3.zero; }
@@ -226,9 +290,105 @@ public class GameNetworkManager : NetworkBehaviour
     {
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        robot.transform.SetPositionAndRotation(pos, rot);
         var rb = robot.GetComponent<Rigidbody>();
-        if (rb != null && rb.isKinematic) { rb.position = pos; rb.rotation = rot; }
+        if (rb != null && rb.isKinematic)
+        {
+            rb.position = pos;
+            rb.rotation = rot;
+        }
+        else
+        {
+            robot.transform.SetPositionAndRotation(pos, rot);
+        }
+    }
+
+    // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots
+    // into a single unreliable custom message.  Client receives and sets kinematic joints.
+    private void SendJointSync()
+    {
+        // First pass: collect filtered Rigidbody lists so we know exact buffer size.
+        var perSlot = new System.Collections.Generic.List<Rigidbody>[4];
+        int totalBytes = 0;
+        for (int slot = 0; slot < 4; slot++)
+        {
+            var robot = _loadMatch.GetRobotLoaded(slot);
+            if (robot == null) continue;
+            var rootRb = robot.GetComponent<Rigidbody>();
+            var buf = new System.Collections.Generic.List<Rigidbody>();
+            foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
+            {
+                if (rb == rootRb) continue;
+                if (rb.GetComponent<GamePiece>() != null) continue;
+                buf.Add(rb);
+            }
+            if (buf.Count == 0) continue;
+            perSlot[slot] = buf;
+            int clamped = Mathf.Min(buf.Count, 255);
+            totalBytes += 2 + clamped * 28; // header (slot+count) + joints (pos+rot)
+        }
+        if (totalBytes == 0) return;
+
+        using var writer = new FastBufferWriter(totalBytes, Allocator.Temp);
+        for (int slot = 0; slot < 4; slot++)
+        {
+            var buf = perSlot[slot];
+            if (buf == null) continue;
+            writer.WriteValueSafe((byte)slot);
+            writer.WriteValueSafe((byte)Mathf.Min(buf.Count, 255));
+            int limit = Mathf.Min(buf.Count, 255);
+            for (int j = 0; j < limit; j++)
+            {
+                var p = buf[j].position;
+                var q = buf[j].rotation;
+                writer.WriteValueSafe(p.x); writer.WriteValueSafe(p.y); writer.WriteValueSafe(p.z);
+                writer.WriteValueSafe(q.x); writer.WriteValueSafe(q.y); writer.WriteValueSafe(q.z); writer.WriteValueSafe(q.w);
+            }
+        }
+
+        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
+            MSG_JOINT_SYNC, writer, NetworkDelivery.UnreliableSequenced);
+    }
+
+    // Client: receive joint positions from host and apply to kinematic joint Rigidbodies.
+    private void OnJointSyncReceived(ulong senderId, FastBufferReader reader)
+    {
+        if (_loadMatch == null) return;
+
+        while (reader.Position < reader.Length)
+        {
+            reader.ReadValueSafe(out byte slot);
+            reader.ReadValueSafe(out byte jointCount);
+
+            var robot  = _loadMatch.GetRobotLoaded(slot);
+            var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
+
+            // Pre-build the filtered list in the same order as SendJointSync (O(n) total).
+            Rigidbody[] filtered = System.Array.Empty<Rigidbody>();
+            if (robot != null)
+            {
+                var allRbs = robot.GetComponentsInChildren<Rigidbody>();
+                var buf = new System.Collections.Generic.List<Rigidbody>(allRbs.Length);
+                foreach (var rb in allRbs)
+                {
+                    if (rb == rootRb) continue;
+                    if (rb.GetComponent<GamePiece>() != null) continue;
+                    buf.Add(rb);
+                }
+                filtered = buf.ToArray();
+            }
+
+            for (int j = 0; j < jointCount; j++)
+            {
+                reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
+                reader.ReadValueSafe(out float qx); reader.ReadValueSafe(out float qy); reader.ReadValueSafe(out float qz); reader.ReadValueSafe(out float qw);
+
+                if (j >= filtered.Length) continue;
+                var rb = filtered[j];
+                if (rb == null || !rb.isKinematic) continue;
+                rb.position = new Vector3(px, py, pz);
+                rb.rotation = new Quaternion(qx, qy, qz, qw);
+            }
+        }
     }
 
     // ── Client: read local input and forward to host ──────────────────────────
@@ -263,10 +423,40 @@ public class GameNetworkManager : NetworkBehaviour
         var pi = robot.GetComponent<PlayerInput>();
         if (pi == null) return;
 
+        // ── Drivetrain ──────────────────────────────────────────────────────
         var left  = pi.actions.FindAction("LeftStick")?.ReadValue<Vector2>()  ?? Vector2.zero;
         var right = pi.actions.FindAction("RightStick")?.ReadValue<Vector2>() ?? Vector2.zero;
-
         SendRobotInputServerRpc(slot, left.x, left.y, right.x);
+
+        // ── Mechanisms (JointController setpoints) ──────────────────────────
+        var actionMap = pi.actions.FindActionMap("Robot");
+        if (actionMap == null) return;
+
+        var joints = robot.GetComponentsInChildren<JointController>();
+        if (joints.Length == 0) return;
+
+        ulong triggered = 0, held = 0;
+        int bit = 0;
+        foreach (var jc in joints)
+        {
+            if (jc.setPoints == null) continue;
+            for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
+            {
+                var spData = jc.setPoints[sp];
+                var ctrlAction = actionMap.FindAction(spData.controllerButton.ToString());
+                var kbAction   = actionMap.FindAction(spData.keyboardButton.ToString());
+
+                bool t = (ctrlAction?.triggered ?? false) || (kbAction?.triggered ?? false);
+                bool h = (ctrlAction?.IsPressed() ?? false) || (kbAction?.IsPressed() ?? false);
+
+                if (t) triggered |= 1UL << bit;
+                if (h) held      |= 1UL << bit;
+            }
+        }
+
+        // Always send so the server sees held=false when the button is released.
+        // The server-side _netHeld[] reflects the current held state, not accumulated.
+        SendRobotActionsServerRpc(slot, triggered, held);
     }
 
     private static (int first, int last) ClientSlots(PlayMode mode) => mode switch
@@ -305,7 +495,6 @@ public class GameNetworkManager : NetworkBehaviour
         byte view, byte useBlue)
     {
         if (IsHost) return; // host already applied locally
-
         if (_loadMatch == null) return;
 
         var settings = _loadMatch.GetSettingsCopy();
@@ -321,6 +510,49 @@ public class GameNetworkManager : NetworkBehaviour
         settings.view            = (Util.Cameras)view;
         settings.useBlueAlliance = useBlue != 0;
 
+        // Pre-apply settings so the mode is correct when ApplyRoleToLoadedMatch
+        // reads it. HandleNetworkMatchStart may call ApplySettings again (idempotent).
+        _loadMatch.ApplySettings(settings);
+
+        int versionAtRpc = _loadMatch.SetupVersion;
         OnNetworkMatchStart?.Invoke(settings);
+
+        // Belt-and-suspenders: start a coroutine that waits for HandleNetworkMatchStart
+        // to trigger ResetField() (version increment) and SetupInputsWhenReady to finish,
+        // then explicitly applies role config. This handles cases where the Update()-based
+        // version check is missed due to same-frame completion of SetupInputsWhenReady.
+        StartCoroutine(ApplyRoleWhenReady(versionAtRpc + 1));
+    }
+
+    // Waits for LoadMatch to finish resetting the field (SetupVersion >= waitForVersion)
+    // and for input setup to complete (IsInputReady), then applies role config.
+    // Uses unscaled time so it works correctly while the options menu has timeScale = 0.
+    private IEnumerator ApplyRoleWhenReady(int waitForVersion)
+    {
+        float elapsed = 0f;
+        const float kTimeout = 8f;
+
+        // Wait for ResetField() to run — SetupVersion must reach the expected value.
+        while (_loadMatch != null && _loadMatch.SetupVersion < waitForVersion)
+        {
+            elapsed += Time.unscaledDeltaTime;
+            if (elapsed > kTimeout) yield break;
+            yield return null;
+        }
+        if (_loadMatch == null) yield break;
+
+        // Wait for PairInputs() to finish.
+        elapsed = 0f;
+        while (_loadMatch != null && !_loadMatch.IsInputReady)
+        {
+            elapsed += Time.unscaledDeltaTime;
+            if (elapsed > kTimeout) yield break;
+            yield return null;
+        }
+        if (_loadMatch == null) yield break;
+
+        // Apply role config and update the version tracker so Update() doesn't re-apply.
+        _lastAppliedSetupVersion = _loadMatch.SetupVersion;
+        ApplyRoleToLoadedMatch();
     }
 }
