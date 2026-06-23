@@ -615,6 +615,7 @@ public class LoadMatch : MonoBehaviour
 
         _activeRobot1 = Instantiate(robotPrefab1, p1Spawn.position, p1Spawn.rotation, _fieldHolder.transform);
         _activeRobot1.name = robotPrefab1.name + "_P1";
+        NetworkSpawnRobot(_activeRobot1, 0);
         EnsurePlayerInputConfigured(_activeRobot1);
         ConfigureRobotDriveMode(_activeRobot1, false);
         ConfigureOutpostReleaseOwnership(_activeRobot1, false);
@@ -646,6 +647,7 @@ public class LoadMatch : MonoBehaviour
 
         _activeRobot2 = Instantiate(robotPrefab2, p2Spawn.position, p2Spawn.rotation, _fieldHolder.transform);
         _activeRobot2.name = robotPrefab2.name + "_P2";
+        NetworkSpawnRobot(_activeRobot2, 1);
         EnsurePlayerInputConfigured(_activeRobot2);
         ConfigureRobotDriveMode(_activeRobot2, _settings.playMode == Util.PlayMode.OneVsOne);
         ConfigureOutpostReleaseOwnership(_activeRobot2, _settings.playMode == Util.PlayMode.OneVsOne);
@@ -668,8 +670,9 @@ public class LoadMatch : MonoBehaviour
         GameObject robotPrefab3 = GetRobotPrefabBySelection(_settings.robotIndex3);
         _activeRobot3 = Instantiate(robotPrefab3, p3Spawn.position, p3Spawn.rotation, _fieldHolder.transform);
         _activeRobot3.name = robotPrefab3.name + "_P3";
+        NetworkSpawnRobot(_activeRobot3, 2);
         EnsurePlayerInputConfigured(_activeRobot3);
-        ConfigureRobotDriveMode(_activeRobot3, true);   // true = red side
+        ConfigureRobotDriveMode(_activeRobot3, true);
         ConfigureOutpostReleaseOwnership(_activeRobot3, true);
         ApplyBumperNumber(_activeRobot3, _settings.bumperNumber3);
         CreateRobotTag(_activeRobot3, "P3", true);
@@ -684,8 +687,9 @@ public class LoadMatch : MonoBehaviour
         GameObject robotPrefab4 = GetRobotPrefabBySelection(_settings.robotIndex4);
         _activeRobot4 = Instantiate(robotPrefab4, p4Spawn.position, p4Spawn.rotation, _fieldHolder.transform);
         _activeRobot4.name = robotPrefab4.name + "_P4";
+        NetworkSpawnRobot(_activeRobot4, 3);
         EnsurePlayerInputConfigured(_activeRobot4);
-        ConfigureRobotDriveMode(_activeRobot4, true);   // true = red side
+        ConfigureRobotDriveMode(_activeRobot4, true);
         ConfigureOutpostReleaseOwnership(_activeRobot4, true);
         ApplyBumperNumber(_activeRobot4, _settings.bumperNumber4);
         CreateRobotTag(_activeRobot4, "P4", true);
@@ -826,32 +830,46 @@ public class LoadMatch : MonoBehaviour
         }
     }
 
-    // ── NEW: bind all four robots to gamepads 0-3 ─────────────────────────
+    // ── Bind all four robots to gamepads 0-3, keyboard as last resort ────────
     private void PairFourRobots(ReadOnlyArray<Gamepad> pads)
     {
-        // Pair blue alliance robots (P1, P2) the same way as TwoVsZero/OneVsOne.
+        // Blue alliance (P1, P2) — uses existing two-robot pairing which already
+        // handles keyboard fallback for P2 when only one gamepad is present.
         PairTwoRobots(pads);
 
-        // Pair red alliance robots (P3, P4) to gamepads 2 and 3.
+        // Keyboard is claimed by P2 if P2 had no gamepad but keyboard is available.
+        bool keyboardClaimed = pads.Count < 2 && Keyboard.current != null;
+
+        // P3 — gamepad 2, or keyboard if free, or disabled
         if (_activeRobot3 != null)
         {
             if (pads.Count >= 3)
                 BindRobotToGamepad(_activeRobot3, pads[2], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot3, keyboardControlScheme);
+                keyboardClaimed = true;
+            }
             else
             {
                 DisableRobotInput(_activeRobot3);
-                Debug.LogWarning("Player 3 has no gamepad — robot disabled. Connect a 3rd gamepad for 2v2.");
+                Debug.LogWarning("Player 3 has no available input device.");
             }
         }
 
+        // P4 — gamepad 3, or keyboard if free, or disabled
         if (_activeRobot4 != null)
         {
             if (pads.Count >= 4)
                 BindRobotToGamepad(_activeRobot4, pads[3], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot4, keyboardControlScheme);
+            }
             else
             {
                 DisableRobotInput(_activeRobot4);
-                Debug.LogWarning("Player 4 has no gamepad — robot disabled. Connect a 4th gamepad for 2v2.");
+                Debug.LogWarning("Player 4 has no available input device.");
             }
         }
     }
@@ -988,6 +1006,32 @@ public class LoadMatch : MonoBehaviour
                 r.material.color = target;
             }
         }
+    }
+
+    /// <summary>
+    /// If a network session is active and this machine is the server, registers the
+    /// robot with FishNet and assigns ownership to the appropriate client connection.
+    /// No-op in offline play — existing behaviour is completely unchanged.
+    /// </summary>
+    private void NetworkSpawnRobot(GameObject robot, int slot)
+    {
+        var mgr = Network.NetworkGameManager.Instance;
+        if (mgr == null || !mgr.IsServer) return;
+
+        var netObj = robot.GetComponent<FishNet.Object.NetworkObject>();
+        if (netObj == null)
+        {
+            Debug.LogWarning($"[NetworkSpawnRobot] Robot {robot.name} has no NetworkObject component — add one to the prefab.");
+            return;
+        }
+
+        // Look up which connection owns this slot; null = server keeps ownership
+        var owner = NetworkSlotManager.Instance?.GetConnectionForSlot(slot);
+        FishNet.InstanceFinder.ServerManager.Spawn(netObj, owner);
+
+        // Broadcast name + alliance to all clients via SyncVar
+        var sync = robot.GetComponent<NetworkRobotSync>();
+        sync?.InitialiseRobot(robot.name, IsRobotOnRedAllianceSide(slot >= 2));
     }
 
     private void ConfigureRobotDriveMode(GameObject robot, bool isPlayer2)
