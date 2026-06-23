@@ -151,6 +151,8 @@ namespace Util
                 _resolvedToggleAction.Enable();
                 _resolvedToggleAction.performed += OnToggleMenuPerformed;
             }
+
+            GameNetworkManager.OnNetworkMatchStart += HandleNetworkMatchStart;
         }
 
         private void OnDisable()
@@ -160,6 +162,8 @@ namespace Util
                 _resolvedToggleAction.performed -= OnToggleMenuPerformed;
                 _resolvedToggleAction.Disable();
             }
+
+            GameNetworkManager.OnNetworkMatchStart -= HandleNetworkMatchStart;
         }
 
         private void Start()
@@ -464,6 +468,13 @@ namespace Util
             void ApplyAndReset()
             {
                 loadMatch.ApplySettings(_workingSettings);
+
+                // If hosting, push these settings to all clients before resetting locally
+                // so both machines start the same match at roughly the same time.
+                var gnm = GameNetworkManager.Instance;
+                if (gnm != null && gnm.IsHost)
+                    gnm.BroadcastMatchStart(_workingSettings);
+
                 ResumeRuntimeState();
 
                 multiplayerPanel?.Close();
@@ -1116,6 +1127,26 @@ namespace Util
         }
 
         public bool IsOpen() => _isOpen;
+
+        // Called on the client when the host clicks Apply — starts the same match here
+        // without requiring the client to touch the options menu at all.
+        private void HandleNetworkMatchStart(MatchSettings settings)
+        {
+            if (loadMatch == null) return;
+
+            if (_isOpen)
+            {
+                // Menu is open: borrow the host's settings and close as if we clicked Apply.
+                _workingSettings = settings;
+                ApplyAndClose();
+            }
+            else
+            {
+                // Menu already closed (match was already running); just reset with new settings.
+                loadMatch.ApplySettings(settings);
+                loadMatch.ResetField();
+            }
+        }
 
         // Clones an existing menu button so the new one automatically matches the UI style.
         // Replaces onClick entirely so neither persistent (Inspector) nor runtime listeners carry over.

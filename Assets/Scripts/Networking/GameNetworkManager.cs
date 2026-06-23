@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -16,6 +17,12 @@ using PlayMode = Util.PlayMode;
 [RequireComponent(typeof(NetworkObject))]
 public class GameNetworkManager : NetworkBehaviour
 {
+    public static GameNetworkManager Instance { get; private set; }
+
+    // Fires on the client machine when the host clicks Apply.
+    // OptionsMenuController subscribes to apply host settings and start the match automatically.
+    public static event Action<MatchSettings> OnNetworkMatchStart;
+
     [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz fixed rate)")]
     [SerializeField] private int robotSyncEveryNFixed = 3;
 
@@ -40,6 +47,10 @@ public class GameNetworkManager : NetworkBehaviour
     private bool _roleApplied;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    private void Awake() { Instance = this; }
+
+    private void OnDestroy() { if (Instance == this) Instance = null; }
 
     public override void OnNetworkSpawn()
     {
@@ -250,4 +261,52 @@ public class GameNetworkManager : NetworkBehaviour
         PlayMode.TwoVsTwo => (2, 3),
         _                 => (-1, -1)
     };
+
+    // ── Host → Client: sync match settings and start the match ───────────────
+
+    // Call from OptionsMenuController.ApplyAndClose() when hosting.
+    // Sends host's settings to all clients so they start the same match automatically.
+    public void BroadcastMatchStart(MatchSettings settings)
+    {
+        if (!IsHost || !IsSpawned) return;
+        SyncAndStartMatchClientRpc(
+            (byte)settings.playMode,
+            (byte)Mathf.Clamp(settings.robotIndex1, 0, 255),
+            (byte)Mathf.Clamp(settings.robotIndex2, 0, 255),
+            (byte)Mathf.Clamp(settings.robotIndex3, 0, 255),
+            (byte)Mathf.Clamp(settings.robotIndex4, 0, 255),
+            (byte)Mathf.Clamp(settings.blueSpawnIndex1, 0, 255),
+            (byte)Mathf.Clamp(settings.blueSpawnIndex2, 0, 255),
+            (byte)Mathf.Clamp(settings.redSpawnIndex1, 0, 255),
+            (byte)Mathf.Clamp(settings.redSpawnIndex2, 0, 255),
+            (byte)settings.view,
+            (byte)(settings.useBlueAlliance ? 1 : 0)
+        );
+    }
+
+    [ClientRpc]
+    private void SyncAndStartMatchClientRpc(
+        byte playMode, byte r1, byte r2, byte r3, byte r4,
+        byte bs1, byte bs2, byte rs1, byte rs2,
+        byte view, byte useBlue)
+    {
+        if (IsHost) return; // host already applied locally
+
+        if (_loadMatch == null) return;
+
+        var settings = _loadMatch.GetSettingsCopy();
+        settings.playMode        = (PlayMode)playMode;
+        settings.robotIndex1     = r1;
+        settings.robotIndex2     = r2;
+        settings.robotIndex3     = r3;
+        settings.robotIndex4     = r4;
+        settings.blueSpawnIndex1 = bs1;
+        settings.blueSpawnIndex2 = bs2;
+        settings.redSpawnIndex1  = rs1;
+        settings.redSpawnIndex2  = rs2;
+        settings.view            = (Util.Cameras)view;
+        settings.useBlueAlliance = useBlue != 0;
+
+        OnNetworkMatchStart?.Invoke(settings);
+    }
 }
