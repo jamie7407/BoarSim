@@ -154,7 +154,7 @@ public class SwerveController : MonoBehaviour
         {
             _translateValue = _translateAction.ReadValue<Vector2>();
         }
-        else if (!inputsOveriden || !steerOveriden)
+        else if (!inputsOveriden && !steerOveriden)
         {
             _translateValue = _translateAction.ReadValue<Vector2>();
             _rotateValue = _rotateAction.ReadValue<Vector2>();

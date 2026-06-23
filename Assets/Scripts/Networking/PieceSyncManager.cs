@@ -166,8 +166,25 @@ public class PieceSyncManager : NetworkBehaviour
 
     private void SendDelta()
     {
-        if (_serverPieces.Length == 0) return;
         if (NetworkManager.ConnectedClientsList.Count <= 1) return;
+
+        // Detect pieces destroyed since the last registration scan and immediately
+        // broadcast their IDs. Without this, clients see scored/consumed pieces for
+        // up to the full 5-second RegistrationLoop interval.
+        bool anyDestroyed = false;
+        foreach (var kvp in _serverIds)
+            if (kvp.Key == null) { anyDestroyed = true; break; }
+        if (anyDestroyed)
+        {
+            var stale = new System.Collections.Generic.List<GamePiece>();
+            foreach (var kvp in _serverIds)
+                if (kvp.Key == null) { _pendingDeleteIds.Add(kvp.Value); stale.Add(kvp.Key); }
+            foreach (var k in stale) _serverIds.Remove(k);
+            _serverPieces = FindObjectsOfType<GamePiece>();
+            SendDeletions();
+        }
+
+        if (_serverPieces.Length == 0) return;
 
         // Worst case per entry: id(2) + pos(12) + rot(16) + flags(1) + vel(12) + angVel(12) = 55
         int maxBuf = _serverPieces.Length * 56;

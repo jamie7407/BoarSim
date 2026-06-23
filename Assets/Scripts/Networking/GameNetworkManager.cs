@@ -193,12 +193,16 @@ public class GameNetworkManager : NetworkBehaviour
             // kinematic so SyncRobotsClientRpc drives it cleanly via rb.position/rb.rotation.
             // Without this P2's non-kinematic root fights the host position every frame,
             // causing the glitch-then-revert behaviour.
+            // Disable interpolation so rb.position assignments snap immediately; interpolation
+            // causes the visual transform to drift toward the target rather than snapping.
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
                 if (robot == null) continue;
                 var rb = robot.GetComponent<Rigidbody>();
-                if (rb != null) rb.isKinematic = true;
+                if (rb == null) continue;
+                rb.isKinematic = true;
+                rb.interpolation = RigidbodyInterpolation.None;
             }
         }
     }
@@ -218,6 +222,7 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
+                rb.interpolation = RigidbodyInterpolation.None;
             }
         }
     }
@@ -315,13 +320,12 @@ public class GameNetworkManager : NetworkBehaviour
     }
 
     // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots
-    // into a single unreliable custom message.  Client receives and sets kinematic joints.
-    // Positions are sent in robot-root-local space so the client can reconvert to world using
-    // its own (already-synced) root transform — this eliminates the trailing artifact that
-    // occurs when the root and joint syncs arrive in different physics frames.
+    // into a single unreliable custom message.  Root pos/rot is embedded alongside the joints
+    // so the client always applies joints relative to the exact root sent in the same packet —
+    // eliminating the race condition between the reliable ClientRpc root sync and this message.
     private void SendJointSync()
     {
-        // First pass: collect filtered Rigidbody lists so we know exact buffer size.
+        // First pass: collect filtered Rigidbody lists and store root transforms.
         var perSlot       = new System.Collections.Generic.List<Rigidbody>[4];
         var slotTransform = new Transform[4];
         int totalBytes = 0;
@@ -341,7 +345,8 @@ public class GameNetworkManager : NetworkBehaviour
             if (buf.Count == 0) continue;
             perSlot[slot] = buf;
             int clamped = Mathf.Min(buf.Count, 255);
-            totalBytes += 2 + clamped * 28; // header (slot+count) + joints (localPos+localRot)
+            // slot(1) + rootPos(12) + rootRot(16) + count(1) + joints(count*28)
+            totalBytes += 30 + clamped * 28;
         }
         if (totalBytes == 0) return;
 
@@ -351,14 +356,21 @@ public class GameNetworkManager : NetworkBehaviour
             var buf     = perSlot[slot];
             var robotTx = slotTransform[slot];
             if (buf == null || robotTx == null) continue;
+
+            // Embed root world pos/rot so the client uses exactly this root, not one from a
+            // separately-timed reliable message (which may arrive in a different network tick).
+            var rp = robotTx.position;
+            var rq = robotTx.rotation;
             writer.WriteValueSafe((byte)slot);
+            writer.WriteValueSafe(rp.x); writer.WriteValueSafe(rp.y); writer.WriteValueSafe(rp.z);
+            writer.WriteValueSafe(rq.x); writer.WriteValueSafe(rq.y); writer.WriteValueSafe(rq.z); writer.WriteValueSafe(rq.w);
             writer.WriteValueSafe((byte)Mathf.Min(buf.Count, 255));
+
             int limit = Mathf.Min(buf.Count, 255);
-            var invRot = Quaternion.Inverse(robotTx.rotation);
+            var invRot = Quaternion.Inverse(rq);
             for (int j = 0; j < limit; j++)
             {
-                // Convert to root-local space so the client can apply relative to its own root.
-                var p = robotTx.InverseTransformPoint(buf[j].position);
+                var p = invRot * (buf[j].position - rp);
                 var q = invRot * buf[j].rotation;
                 writer.WriteValueSafe(p.x); writer.WriteValueSafe(p.y); writer.WriteValueSafe(p.z);
                 writer.WriteValueSafe(q.x); writer.WriteValueSafe(q.y); writer.WriteValueSafe(q.z); writer.WriteValueSafe(q.w);
@@ -370,9 +382,8 @@ public class GameNetworkManager : NetworkBehaviour
     }
 
     // Client: receive joint positions from host and apply to kinematic joint Rigidbodies.
-    // Positions arrive in robot-root-local space (see SendJointSync); we reconvert to world
-    // using the client's current root transform so joints track the robot regardless of
-    // when the root and joint syncs land relative to each other.
+    // Each slot packet includes the root world pos/rot sent in the same host FixedUpdate,
+    // so the client uses exactly that root — no dependency on separately-timed root sync.
     private void OnJointSyncReceived(ulong senderId, FastBufferReader reader)
     {
         if (_loadMatch == null) return;
@@ -380,18 +391,24 @@ public class GameNetworkManager : NetworkBehaviour
         while (reader.Position < reader.Length)
         {
             reader.ReadValueSafe(out byte slot);
+
+            // Root position embedded in this packet — apply it immediately.
+            reader.ReadValueSafe(out float rpx); reader.ReadValueSafe(out float rpy); reader.ReadValueSafe(out float rpz);
+            reader.ReadValueSafe(out float rqx); reader.ReadValueSafe(out float rqy); reader.ReadValueSafe(out float rqz); reader.ReadValueSafe(out float rqw);
+            var rootPos = new Vector3(rpx, rpy, rpz);
+            var rootRot = new Quaternion(rqx, rqy, rqz, rqw);
+
             reader.ReadValueSafe(out byte jointCount);
 
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // Use rootRb.position/rotation directly — for kinematic bodies Unity only syncs
-            // rb→transform at the end of the next FixedUpdate, so transform.position would
-            // still be stale here if ApplyRobot already set rb.position this same Update tick.
-            var rootPos = rootRb != null ? rootRb.position
-                          : (robot != null ? robot.transform.position : Vector3.zero);
-            var rootRot = rootRb != null ? rootRb.rotation
-                          : (robot != null ? robot.transform.rotation : Quaternion.identity);
+            // Apply root from this packet so joints use the same world position.
+            if (rootRb != null)
+            {
+                rootRb.position = rootPos;
+                rootRb.rotation = rootRot;
+            }
 
             // Pre-build the filtered list in the same order as SendJointSync (O(n) total).
             Rigidbody[] filtered = System.Array.Empty<Rigidbody>();
@@ -417,7 +434,6 @@ public class GameNetworkManager : NetworkBehaviour
                 var rb = filtered[j];
                 if (rb == null || !rb.isKinematic) continue;
 
-                // Reconvert root-local → world. Scale assumed 1 so no TransformPoint needed.
                 rb.position = rootPos + rootRot * new Vector3(px, py, pz);
                 rb.rotation = rootRot * new Quaternion(qx, qy, qz, qw);
             }
@@ -429,39 +445,54 @@ public class GameNetworkManager : NetworkBehaviour
     private IEnumerator InputSendLoop()
     {
         var waitFixed = new WaitForFixedUpdate();
-        int tick = 0;
+        int mechTick = 0;
 
         while (IsClient && !IsHost)
         {
             yield return waitFixed;
-            if (++tick < robotSyncEveryNFixed) continue;
-            tick = 0;
 
-            // Use local settings (same propagation-delay fix as ApplyRoleToLoadedMatch).
             var mode = _loadMatch != null
                 ? (PlayMode)_loadMatch.GetSettingsCopy().playMode
                 : (PlayMode)_netPlayMode.Value;
             var (first, last) = ClientSlots(mode);
+
+            // Drivetrain every FixedUpdate: overideInputs() on the host only lasts one physics
+            // frame (inputsOveriden is cleared after processing), so we must call it every tick
+            // or the robot coasts to a stop for 2 out of every 3 frames at the old 3-tick rate.
             for (int i = first; i <= last; i++)
-                SendInputForSlot(i);
+                SendDriveInputForSlot(i);
+
+            // Mechanisms throttled — reliable RPC, no need for 50 Hz.
+            if (++mechTick >= robotSyncEveryNFixed)
+            {
+                mechTick = 0;
+                for (int i = first; i <= last; i++)
+                    SendMechInputForSlot(i);
+            }
         }
     }
 
-    private void SendInputForSlot(int slot)
+    private void SendDriveInputForSlot(int slot)
     {
         if (slot < 0 || _loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-
         var pi = robot.GetComponent<PlayerInput>();
         if (pi == null) return;
 
-        // ── Drivetrain ──────────────────────────────────────────────────────
         var left  = pi.actions.FindAction("LeftStick")?.ReadValue<Vector2>()  ?? Vector2.zero;
         var right = pi.actions.FindAction("RightStick")?.ReadValue<Vector2>() ?? Vector2.zero;
         SendRobotInputServerRpc(slot, left.x, left.y, right.x);
+    }
 
-        // ── Mechanisms (JointController setpoints) ──────────────────────────
+    private void SendMechInputForSlot(int slot)
+    {
+        if (slot < 0 || _loadMatch == null) return;
+        var robot = _loadMatch.GetRobotLoaded(slot);
+        if (robot == null) return;
+        var pi = robot.GetComponent<PlayerInput>();
+        if (pi == null) return;
+
         var actionMap = pi.actions.FindActionMap("Robot");
         if (actionMap == null) return;
 
@@ -488,7 +519,6 @@ public class GameNetworkManager : NetworkBehaviour
         }
 
         // Always send so the server sees held=false when the button is released.
-        // The server-side _netHeld[] reflects the current held state, not accumulated.
         SendRobotActionsServerRpc(slot, triggered, held);
     }
 
