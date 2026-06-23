@@ -492,7 +492,7 @@
                     "path": "2DVector",
                     "interactions": "",
                     "processors": "",
-                    "groups": "",
+                    "groups": "Keyboard",
                     "action": "LeftStick",
                     "isComposite": true,
                     "isPartOfComposite": false
@@ -558,7 +558,7 @@
                     "path": "2DVector",
                     "interactions": "",
                     "processors": "",
-                    "groups": "",
+                    "groups": "Keyboard",
                     "action": "RightStick",
                     "isComposite": true,
                     "isPartOfComposite": false
