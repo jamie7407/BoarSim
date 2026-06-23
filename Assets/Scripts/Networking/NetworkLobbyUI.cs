@@ -23,16 +23,22 @@ public class NetworkLobbyUI : MonoBehaviour
     private TMP_InputField _joinCodeInput;
     private GameObject _joinSection;
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    // Canvas to parent the panel under. Set by OptionsMenuController before the
+    // first Open() call so we never rely on Find ordering in Start().
+    private Canvas _targetCanvas;
+    public void SetTargetCanvas(Canvas canvas) { _targetCanvas = canvas; }
 
-    private void Start()
-    {
-        BuildPanel();
-        _panelRoot?.SetActive(false);
-    }
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public void Open()
     {
+        // Build lazily on first open so we're guaranteed the scene is ready.
+        if (_panelRoot == null)
+        {
+            var canvas = _targetCanvas != null ? _targetCanvas : FindFirstObjectByType<Canvas>();
+            if (canvas == null) { Debug.LogError("[Net] NetworkLobbyUI: no Canvas found — lobby cannot open."); return; }
+            BuildPanel(canvas);
+        }
         if (_panelRoot == null) return;
         _panelRoot.SetActive(true);
         _joinSection?.SetActive(false);
@@ -47,11 +53,8 @@ public class NetworkLobbyUI : MonoBehaviour
 
     // ── Build all UI in code ──────────────────────────────────────────────────
 
-    private void BuildPanel()
+    private void BuildPanel(Canvas canvas)
     {
-        var canvas = FindFirstObjectByType<Canvas>();
-        if (canvas == null) { Debug.LogError("[Net] NetworkLobbyUI: no Canvas found."); return; }
-
         // Full-screen dark background
         _panelRoot = MakePanel("NetLobbyPanel", canvas.transform, new Color(0.08f, 0.08f, 0.12f, 0.97f));
         StretchFull(_panelRoot.GetComponent<RectTransform>());

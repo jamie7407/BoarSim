@@ -575,6 +575,14 @@ namespace Util
             if (_isTransitioning) return;
             _isTransitioning = true;
 
+            // Hand the lobby panel the correct Canvas (the one that owns menuRoot)
+            // before first open, so it never has to search for one itself.
+            if (multiplayerPanel != null && menuRoot != null)
+            {
+                var canvas = menuRoot.GetComponentInParent<Canvas>();
+                if (canvas != null) multiplayerPanel.SetTargetCanvas(canvas);
+            }
+
             void Show()
             {
                 if (menuRoot     != null) menuRoot.SetActive(false);
