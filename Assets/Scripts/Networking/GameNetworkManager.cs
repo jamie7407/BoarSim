@@ -90,7 +90,7 @@ public class GameNetworkManager : NetworkBehaviour
 
     private void Update()
     {
-        if (!IsNetworkSpawned) return;
+        if (!IsSpawned) return;
 
         // Server: push FMS state into NetworkVariables
         if (IsServer)
