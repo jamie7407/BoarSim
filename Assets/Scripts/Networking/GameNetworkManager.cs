@@ -2,7 +2,7 @@ using System.Collections;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using Util;
+using PlayMode = Util.PlayMode;
 
 // Single NetworkObject that handles:
 //   - Robot transform sync   (ClientRpc at ~20 Hz)
