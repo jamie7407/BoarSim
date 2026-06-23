@@ -262,8 +262,21 @@ namespace Util
             if (controlsButton != null) controlsButton.onClick.AddListener(OpenControls);
             if (controlsBackButton != null) controlsBackButton.onClick.AddListener(CloseControls);
 
-            if (multiplayerButton != null) multiplayerButton.onClick.AddListener(OpenMultiplayer);
-            if (multiplayerPanel != null) multiplayerPanel.OnBackClicked += CloseMultiplayer;
+            // Auto-create the Online button by cloning an existing one if not wired in the Inspector
+            if (multiplayerButton == null)
+                multiplayerButton = CloneMenuButton(creditsButton ?? controlsButton, "Online");
+            if (multiplayerButton != null)
+                multiplayerButton.onClick.AddListener(OpenMultiplayer);
+
+            // Auto-create the lobby panel if not wired in the Inspector
+            if (multiplayerPanel == null)
+            {
+                var go = new GameObject("[NetworkLobbyUI]");
+                go.transform.SetParent(transform);
+                multiplayerPanel = go.AddComponent<NetworkLobbyUI>();
+            }
+            if (multiplayerPanel != null)
+                multiplayerPanel.OnBackClicked += CloseMultiplayer;
 
             if (gameModeDropdown != null)
                 gameModeDropdown.onValueChanged.AddListener(OnGameModeChanged);
@@ -1087,6 +1100,19 @@ namespace Util
         }
 
         public bool IsOpen() => _isOpen;
+
+        // Clones an existing menu button so the new one automatically matches the UI style.
+        private static Button CloneMenuButton(Button source, string label)
+        {
+            if (source == null) return null;
+            var clone = Instantiate(source.gameObject, source.transform.parent);
+            clone.name = $"Btn_{label}";
+            var tmp = clone.GetComponentInChildren<TMPro.TextMeshProUGUI>();
+            if (tmp != null) tmp.text = label;
+            var btn = clone.GetComponent<Button>();
+            btn.onClick.RemoveAllListeners();
+            return btn;
+        }
 
         private void RefreshHumanPlayerObjects(bool configureOwnership)
         {
