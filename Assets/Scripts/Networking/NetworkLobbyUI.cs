@@ -42,7 +42,7 @@ public class NetworkLobbyUI : MonoBehaviour
 
     public void Close()
     {
-        _panelRoot?.SetActive(false);
+        if (_panelRoot != null) _panelRoot.SetActive(false);
     }
 
     // ── Build all UI in code ──────────────────────────────────────────────────

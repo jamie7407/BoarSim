@@ -1102,6 +1102,7 @@ namespace Util
         public bool IsOpen() => _isOpen;
 
         // Clones an existing menu button so the new one automatically matches the UI style.
+        // Replaces onClick entirely so neither persistent (Inspector) nor runtime listeners carry over.
         private static Button CloneMenuButton(Button source, string label)
         {
             if (source == null) return null;
@@ -1110,7 +1111,7 @@ namespace Util
             var tmp = clone.GetComponentInChildren<TMPro.TextMeshProUGUI>();
             if (tmp != null) tmp.text = label;
             var btn = clone.GetComponent<Button>();
-            btn.onClick.RemoveAllListeners();
+            btn.onClick = new Button.ButtonClickedEvent();
             return btn;
         }
 
