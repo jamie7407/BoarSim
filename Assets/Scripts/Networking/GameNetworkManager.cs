@@ -382,9 +382,16 @@ public class GameNetworkManager : NetworkBehaviour
             reader.ReadValueSafe(out byte slot);
             reader.ReadValueSafe(out byte jointCount);
 
-            var robot   = _loadMatch.GetRobotLoaded(slot);
-            var rootRb  = robot != null ? robot.GetComponent<Rigidbody>() : null;
-            var robotTx = robot != null ? robot.transform : null;
+            var robot  = _loadMatch.GetRobotLoaded(slot);
+            var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
+
+            // Use rootRb.position/rotation directly — for kinematic bodies Unity only syncs
+            // rb→transform at the end of the next FixedUpdate, so transform.position would
+            // still be stale here if ApplyRobot already set rb.position this same Update tick.
+            var rootPos = rootRb != null ? rootRb.position
+                          : (robot != null ? robot.transform.position : Vector3.zero);
+            var rootRot = rootRb != null ? rootRb.rotation
+                          : (robot != null ? robot.transform.rotation : Quaternion.identity);
 
             // Pre-build the filtered list in the same order as SendJointSync (O(n) total).
             Rigidbody[] filtered = System.Array.Empty<Rigidbody>();
@@ -406,13 +413,13 @@ public class GameNetworkManager : NetworkBehaviour
                 reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
                 reader.ReadValueSafe(out float qx); reader.ReadValueSafe(out float qy); reader.ReadValueSafe(out float qz); reader.ReadValueSafe(out float qw);
 
-                if (j >= filtered.Length || robotTx == null) continue;
+                if (j >= filtered.Length) continue;
                 var rb = filtered[j];
                 if (rb == null || !rb.isKinematic) continue;
 
-                // Reconvert root-local → world using the client's current root transform.
-                rb.position = robotTx.TransformPoint(new Vector3(px, py, pz));
-                rb.rotation = robotTx.rotation * new Quaternion(qx, qy, qz, qw);
+                // Reconvert root-local → world. Scale assumed 1 so no TransformPoint needed.
+                rb.position = rootPos + rootRot * new Vector3(px, py, pz);
+                rb.rotation = rootRot * new Quaternion(qx, qy, qz, qw);
             }
         }
     }
