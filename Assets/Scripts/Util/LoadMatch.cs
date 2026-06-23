@@ -830,32 +830,46 @@ public class LoadMatch : MonoBehaviour
         }
     }
 
-    // ── NEW: bind all four robots to gamepads 0-3 ─────────────────────────
+    // ── Bind all four robots to gamepads 0-3, keyboard as last resort ────────
     private void PairFourRobots(ReadOnlyArray<Gamepad> pads)
     {
-        // Pair blue alliance robots (P1, P2) the same way as TwoVsZero/OneVsOne.
+        // Blue alliance (P1, P2) — uses existing two-robot pairing which already
+        // handles keyboard fallback for P2 when only one gamepad is present.
         PairTwoRobots(pads);
 
-        // Pair red alliance robots (P3, P4) to gamepads 2 and 3.
+        // Keyboard is claimed by P2 if P2 had no gamepad but keyboard is available.
+        bool keyboardClaimed = pads.Count < 2 && Keyboard.current != null;
+
+        // P3 — gamepad 2, or keyboard if free, or disabled
         if (_activeRobot3 != null)
         {
             if (pads.Count >= 3)
                 BindRobotToGamepad(_activeRobot3, pads[2], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot3, keyboardControlScheme);
+                keyboardClaimed = true;
+            }
             else
             {
                 DisableRobotInput(_activeRobot3);
-                Debug.LogWarning("Player 3 has no gamepad — robot disabled. Connect a 3rd gamepad for 2v2.");
+                Debug.LogWarning("Player 3 has no available input device.");
             }
         }
 
+        // P4 — gamepad 3, or keyboard if free, or disabled
         if (_activeRobot4 != null)
         {
             if (pads.Count >= 4)
                 BindRobotToGamepad(_activeRobot4, pads[3], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot4, keyboardControlScheme);
+            }
             else
             {
                 DisableRobotInput(_activeRobot4);
-                Debug.LogWarning("Player 4 has no gamepad — robot disabled. Connect a 4th gamepad for 2v2.");
+                Debug.LogWarning("Player 4 has no available input device.");
             }
         }
     }
