@@ -51,6 +51,8 @@ public class NetworkLobbyUI : MonoBehaviour
         if (_panelRoot != null) _panelRoot.SetActive(false);
     }
 
+    public bool IsOpen => _panelRoot != null && _panelRoot.activeSelf;
+
     // ── Build all UI in code ──────────────────────────────────────────────────
 
     private void BuildPanel(Canvas canvas)

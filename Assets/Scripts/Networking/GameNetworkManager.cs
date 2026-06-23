@@ -12,9 +12,6 @@ using PlayMode = Util.PlayMode;
 // Supports 1v1 and 2v2:
 //   1v1  — host controls slot 0 (blue), client controls slot 1 (red)
 //   2v2  — host controls slots 0-1 (blue), client controls slots 2-3 (red)
-//
-// The host publishes the active play mode via _netPlayMode so both sides
-// always agree on which slots the client owns, regardless of local settings.
 
 [RequireComponent(typeof(NetworkObject))]
 public class GameNetworkManager : NetworkBehaviour
@@ -30,9 +27,6 @@ public class GameNetworkManager : NetworkBehaviour
     private readonly NetworkVariable<byte> _netRobotState = new(
         0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
-    // Play mode broadcast so the client knows which slots it owns.
-    // Host sets this on spawn; value is already present when the client's
-    // OnNetworkSpawn fires because NGO syncs NetworkVariables before calling it.
     private readonly NetworkVariable<byte> _netPlayMode = new(
         (byte)PlayMode.OneVsOne,
         NetworkVariableReadPermission.Everyone,
@@ -41,13 +35,17 @@ public class GameNetworkManager : NetworkBehaviour
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
 
+    // Tracks whether we've applied role config for the current set of loaded robots.
+    // Resets to false when robots are destroyed (field reset) so we re-apply next load.
+    private bool _roleApplied;
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public override void OnNetworkSpawn()
     {
         _loadMatch = FindFirstObjectByType<LoadMatch>();
         if (_loadMatch == null) { StartCoroutine(WaitForLoadMatch()); return; }
-        ConfigureForRole();
+        OnLoadMatchReady();
     }
 
     private IEnumerator WaitForLoadMatch()
@@ -57,66 +55,92 @@ public class GameNetworkManager : NetworkBehaviour
             yield return new WaitForSeconds(0.5f);
             _loadMatch = FindFirstObjectByType<LoadMatch>();
         }
-        ConfigureForRole();
+        OnLoadMatchReady();
     }
 
-    private void ConfigureForRole()
+    private void OnLoadMatchReady()
     {
         if (IsHost)
         {
-            // Publish the current play mode so the client can determine its slots.
-            var playMode = _loadMatch.GetSettingsCopy().playMode;
-            _netPlayMode.Value = (byte)playMode;
-
-            // Deactivate local input on whichever slots the client will drive.
-            var (first, last) = ClientSlots(playMode);
-            for (int i = first; i <= last; i++)
-            {
-                var robot = _loadMatch.GetRobotLoaded(i);
-                robot?.GetComponent<PlayerInput>()?.DeactivateInput();
-            }
+            _netPlayMode.Value = (byte)_loadMatch.GetSettingsCopy().playMode;
+            // Re-apply if a client connects after the match has already started
+            NetworkManager.OnClientConnectedCallback += OnClientConnected;
         }
 
         if (IsClient && !IsHost)
-        {
-            // Make all client-side robots kinematic — host owns all physics.
-            for (int i = 0; i < 4; i++)
-            {
-                var robot = _loadMatch.GetRobotLoaded(i);
-                if (robot == null) continue;
-                var rb = robot.GetComponent<Rigidbody>();
-                if (rb != null) rb.isKinematic = true;
-            }
-
             StartCoroutine(InputSendLoop());
-        }
     }
 
-    // Returns the inclusive slot range the CLIENT controls for a given play mode.
-    // (-1, -1) means no client-controlled slots (practice modes).
-    private static (int first, int last) ClientSlots(PlayMode mode) => mode switch
+    public override void OnNetworkDespawn()
     {
-        PlayMode.OneVsOne => (1, 1),
-        PlayMode.TwoVsTwo => (2, 3),
-        _                 => (-1, -1)
-    };
+        if (IsServer)
+            NetworkManager.OnClientConnectedCallback -= OnClientConnected;
+    }
 
-    // ── Server: push FMS state into NetworkVariables each frame ──────────────
+    // Called on the host whenever a new client joins.
+    // If robots are already loaded (match in progress), rebind immediately.
+    private void OnClientConnected(ulong clientId)
+    {
+        if (clientId == NetworkManager.LocalClientId) return;
+        if (_loadMatch != null && _loadMatch.GetRobotLoaded(0) != null)
+            _loadMatch.RebindForNetworkPlay(true, (PlayMode)_netPlayMode.Value);
+    }
+
+    // ── Per-frame ─────────────────────────────────────────────────────────────
 
     private void Update()
     {
-        if (!IsServer) return;
-        _netMatchTimer.Value = FMS.MatchTimer;
-        _netMatchState.Value = (byte)FMS.MatchState;
-        _netRobotState.Value = (byte)FMS.RobotState;
-    }
+        if (!IsNetworkSpawned) return;
 
-    // ── Client: keep local FMS timer display accurate (runs after FMS.Update) ─
+        // Server: push FMS state into NetworkVariables
+        if (IsServer)
+        {
+            _netMatchTimer.Value = FMS.MatchTimer;
+            _netMatchState.Value = (byte)FMS.MatchState;
+            _netRobotState.Value = (byte)FMS.RobotState;
+        }
+
+        // Detect robots loading / unloading and configure role each time
+        if (_loadMatch != null)
+        {
+            bool robotsReady = _loadMatch.GetRobotLoaded(0) != null;
+            if (robotsReady && !_roleApplied)
+            {
+                _roleApplied = true;
+                ApplyRoleToLoadedMatch();
+            }
+            else if (!robotsReady)
+            {
+                _roleApplied = false; // will re-apply after next ResetField
+            }
+        }
+    }
 
     private void LateUpdate()
     {
         if (IsClient && !IsHost)
             FMS.MatchTimer = _netMatchTimer.Value;
+    }
+
+    private void ApplyRoleToLoadedMatch()
+    {
+        var mode = (PlayMode)_netPlayMode.Value;
+
+        if (IsHost)
+        {
+            // Re-publish play mode in case it changed since OnNetworkSpawn
+            _netPlayMode.Value = (byte)_loadMatch.GetSettingsCopy().playMode;
+            mode = (PlayMode)_netPlayMode.Value;
+
+            // Only rebind cameras/input when a client is actually connected
+            if (NetworkManager.ConnectedClientsList.Count > 1)
+                _loadMatch.RebindForNetworkPlay(true, mode);
+        }
+        else
+        {
+            // Client always rebinds — host may have started match first
+            _loadMatch.RebindForNetworkPlay(false, mode);
+        }
     }
 
     // ── Server: apply client joystick input to the correct robot ─────────────
@@ -210,4 +234,11 @@ public class GameNetworkManager : NetworkBehaviour
 
         SendRobotInputServerRpc(slot, left.x, left.y, right.x);
     }
+
+    private static (int first, int last) ClientSlots(PlayMode mode) => mode switch
+    {
+        PlayMode.OneVsOne => (1, 1),
+        PlayMode.TwoVsTwo => (2, 3),
+        _                 => (-1, -1)
+    };
 }

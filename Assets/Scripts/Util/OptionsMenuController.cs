@@ -248,6 +248,14 @@ namespace Util
         {
             if (_isTransitioning) return;
 
+            // If the multiplayer lobby is visible, Escape backs out to the menu
+            // rather than closing the whole options screen (which would trigger ResetField).
+            if (multiplayerPanel != null && multiplayerPanel.IsOpen)
+            {
+                CloseMultiplayer();
+                return;
+            }
+
             if (_isOpen) CloseMenuWithoutApply();
             else OpenMenu();
         }

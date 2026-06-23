@@ -1122,6 +1122,95 @@ public class LoadMatch : MonoBehaviour
         return new[] { _activeRobot1, _activeRobot2, _activeRobot3, _activeRobot4 };
     }
 
+    // ── Network play: called by GameNetworkManager after robots load ───────
+    // Reassigns input devices so only the locally-owned slots respond to
+    // this machine's keyboard/gamepad.  Also adjusts camera viewports so each
+    // machine sees only its own player(s) full-screen.
+    public void RebindForNetworkPlay(bool isHost, PlayMode mode)
+    {
+        int clientFirst, clientLast;
+        switch (mode)
+        {
+            case PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
+            case PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
+            default:                 clientFirst = -1; clientLast = -1; break;
+        }
+
+        if (isHost)
+        {
+            // Disable input on client-owned slots so this keyboard can't drive them
+            for (int i = clientFirst; i <= clientLast; i++)
+                DisableRobotInput(GetRobotLoaded(i));
+        }
+        else
+        {
+            var pads = Gamepad.all;
+            int clientPadIndex = 0;
+
+            for (int i = 0; i < 4; i++)
+            {
+                var robot = GetRobotLoaded(i);
+                if (robot == null) continue;
+
+                bool isClientSlot = i >= clientFirst && i <= clientLast;
+                if (!isClientSlot)
+                {
+                    // Host-owned slot: no local physics, no local input
+                    var rb = robot.GetComponent<Rigidbody>();
+                    if (rb != null) rb.isKinematic = true;
+                    DisableRobotInput(robot);
+                }
+                else
+                {
+                    // Client-owned slot: claim a gamepad or fall back to keyboard
+                    if (pads.Count > clientPadIndex)
+                        BindRobotToGamepad(robot, pads[clientPadIndex++], gamepadControlScheme);
+                    else if (Keyboard.current != null)
+                        BindRobotToKeyboard(robot, keyboardControlScheme);
+                }
+            }
+        }
+
+        SetNetworkCameraLayout(isHost, mode);
+    }
+
+    // Destroys the cameras for the remote side and stretches local cameras
+    // to fill the screen, giving each machine a single full-screen (or
+    // side-by-side in 2v2) view of only its own robots.
+    public void SetNetworkCameraLayout(bool isHost, PlayMode mode)
+    {
+        if (mode == PlayMode.OneVsOne)
+        {
+            if (isHost)
+            {
+                ConfigureCameraViewport(_spawnedCamera1, CameraSide.Full);
+                if (_spawnedCamera2 != null) { Destroy(_spawnedCamera2); _spawnedCamera2 = null; }
+            }
+            else
+            {
+                ConfigureCameraViewport(_spawnedCamera2, CameraSide.Full);
+                if (_spawnedCamera1 != null) { Destroy(_spawnedCamera1); _spawnedCamera1 = null; }
+            }
+        }
+        else if (mode == PlayMode.TwoVsTwo)
+        {
+            if (isHost)
+            {
+                ConfigureCameraViewport(_spawnedCamera1, CameraSide.Left);
+                ConfigureCameraViewport(_spawnedCamera2, CameraSide.Right);
+                if (_spawnedCamera3 != null) { Destroy(_spawnedCamera3); _spawnedCamera3 = null; }
+                if (_spawnedCamera4 != null) { Destroy(_spawnedCamera4); _spawnedCamera4 = null; }
+            }
+            else
+            {
+                ConfigureCameraViewport(_spawnedCamera3, CameraSide.Left);
+                ConfigureCameraViewport(_spawnedCamera4, CameraSide.Right);
+                if (_spawnedCamera1 != null) { Destroy(_spawnedCamera1); _spawnedCamera1 = null; }
+                if (_spawnedCamera2 != null) { Destroy(_spawnedCamera2); _spawnedCamera2 = null; }
+            }
+        }
+    }
+
     // ── MODIFIED: tears down robots 3 and 4 as well ───────────────────────
     private void DeleteRobots()
     {
