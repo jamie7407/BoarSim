@@ -1126,14 +1126,14 @@ public class LoadMatch : MonoBehaviour
     // Reassigns input devices so only the locally-owned slots respond to
     // this machine's keyboard/gamepad.  Also adjusts camera viewports so each
     // machine sees only its own player(s) full-screen.
-    public void RebindForNetworkPlay(bool isHost, PlayMode mode)
+    public void RebindForNetworkPlay(bool isHost, Util.PlayMode mode)
     {
         int clientFirst, clientLast;
         switch (mode)
         {
-            case PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
-            case PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
-            default:                 clientFirst = -1; clientLast = -1; break;
+            case Util.PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
+            case Util.PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
+            default:                      clientFirst = -1; clientLast = -1; break;
         }
 
         if (isHost)
@@ -1177,9 +1177,9 @@ public class LoadMatch : MonoBehaviour
     // Destroys the cameras for the remote side and stretches local cameras
     // to fill the screen, giving each machine a single full-screen (or
     // side-by-side in 2v2) view of only its own robots.
-    public void SetNetworkCameraLayout(bool isHost, PlayMode mode)
+    public void SetNetworkCameraLayout(bool isHost, Util.PlayMode mode)
     {
-        if (mode == PlayMode.OneVsOne)
+        if (mode == Util.PlayMode.OneVsOne)
         {
             if (isHost)
             {
@@ -1192,7 +1192,7 @@ public class LoadMatch : MonoBehaviour
                 if (_spawnedCamera1 != null) { Destroy(_spawnedCamera1); _spawnedCamera1 = null; }
             }
         }
-        else if (mode == PlayMode.TwoVsTwo)
+        else if (mode == Util.PlayMode.TwoVsTwo)
         {
             if (isHost)
             {
