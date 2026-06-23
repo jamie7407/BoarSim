@@ -2,43 +2,41 @@ using System.Collections;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Util;
 
 // Single NetworkObject that handles:
-//   - Robot transform sync   (ClientRpc at ~20 Hz — only 4 robots so this is cheap)
-//   - Client input routing   (unreliable ServerRpc so the host can drive red robots)
-//   - FMS state sync         (NetworkVariables: timer, matchState, robotState)
+//   - Robot transform sync   (ClientRpc at ~20 Hz)
+//   - Client input routing   (unreliable ServerRpc)
+//   - FMS state sync         (NetworkVariables)
 //
-// Alliance split:
-//   Host   = Blue alliance (robot slots 0-1). Reads local PlayerInput normally.
-//   Client = Red alliance  (robot slots 2-3). Reads local PlayerInput, forwards via ServerRpc.
+// Supports 1v1 and 2v2:
+//   1v1  — host controls slot 0 (blue), client controls slot 1 (red)
+//   2v2  — host controls slots 0-1 (blue), client controls slots 2-3 (red)
 //
-// On the HOST:
-//   - PlayerInput is deactivated on slots 2-3; those robots are driven by client ServerRpcs.
-//
-// On the CLIENT:
-//   - All four robots are kinematic (host owns physics); GameNetworkManager teleports them
-//     each frame to the positions the host broadcasts.
-//   - SwerveController still runs FixedUpdate on kinematic bodies — no effect on physics,
-//     so no modification of SwerveController is needed.
-//   - Local PlayerInput on slots 2-3 is read and forwarded to the host each ~20 Hz.
-//
-// FMS timer: host drives NetworkVariable; client overrides FMS.MatchTimer in LateUpdate
-// so the display stays accurate. The client's local FMS state machine runs independently
-// (state transitions happen at roughly the right time based on the corrected timer).
+// The host publishes the active play mode via _netPlayMode so both sides
+// always agree on which slots the client owns, regardless of local settings.
 
 [RequireComponent(typeof(NetworkObject))]
 public class GameNetworkManager : NetworkBehaviour
 {
-    [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz)")]
+    [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz fixed rate)")]
     [SerializeField] private int robotSyncEveryNFixed = 3;
 
-    // FMS NetworkVariables — server writes, all clients read
+    // FMS state — server writes, clients read
     private readonly NetworkVariable<float> _netMatchTimer = new(
         0f, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private readonly NetworkVariable<byte> _netMatchState = new(
         0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
     private readonly NetworkVariable<byte> _netRobotState = new(
         0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+
+    // Play mode broadcast so the client knows which slots it owns.
+    // Host sets this on spawn; value is already present when the client's
+    // OnNetworkSpawn fires because NGO syncs NetworkVariables before calling it.
+    private readonly NetworkVariable<byte> _netPlayMode = new(
+        (byte)PlayMode.OneVsOne,
+        NetworkVariableReadPermission.Everyone,
+        NetworkVariableWritePermission.Server);
 
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
@@ -48,11 +46,7 @@ public class GameNetworkManager : NetworkBehaviour
     public override void OnNetworkSpawn()
     {
         _loadMatch = FindFirstObjectByType<LoadMatch>();
-        if (_loadMatch == null)
-        {
-            StartCoroutine(WaitForLoadMatch());
-            return;
-        }
+        if (_loadMatch == null) { StartCoroutine(WaitForLoadMatch()); return; }
         ConfigureForRole();
     }
 
@@ -70,19 +64,22 @@ public class GameNetworkManager : NetworkBehaviour
     {
         if (IsHost)
         {
-            // Deactivate local input on the red alliance robots (slots 2-3).
-            // The host will receive these inputs from the client via ServerRpc.
-            for (int i = 2; i < 4; i++)
+            // Publish the current play mode so the client can determine its slots.
+            var playMode = _loadMatch.GetSettingsCopy().playMode;
+            _netPlayMode.Value = (byte)playMode;
+
+            // Deactivate local input on whichever slots the client will drive.
+            var (first, last) = ClientSlots(playMode);
+            for (int i = first; i <= last; i++)
             {
                 var robot = _loadMatch.GetRobotLoaded(i);
-                if (robot == null) continue;
-                robot.GetComponent<PlayerInput>()?.DeactivateInput();
+                robot?.GetComponent<PlayerInput>()?.DeactivateInput();
             }
         }
 
         if (IsClient && !IsHost)
         {
-            // Make all client-side robots kinematic; host drives their physics.
+            // Make all client-side robots kinematic — host owns all physics.
             for (int i = 0; i < 4; i++)
             {
                 var robot = _loadMatch.GetRobotLoaded(i);
@@ -91,12 +88,20 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb != null) rb.isKinematic = true;
             }
 
-            // Forward red alliance (local) input to the host at ~20 Hz.
             StartCoroutine(InputSendLoop());
         }
     }
 
-    // ── Server: FMS state → NetworkVariables (Update) ─────────────────────────
+    // Returns the inclusive slot range the CLIENT controls for a given play mode.
+    // (-1, -1) means no client-controlled slots (practice modes).
+    private static (int first, int last) ClientSlots(PlayMode mode) => mode switch
+    {
+        PlayMode.OneVsOne => (1, 1),
+        PlayMode.TwoVsTwo => (2, 3),
+        _                 => (-1, -1)
+    };
+
+    // ── Server: push FMS state into NetworkVariables each frame ──────────────
 
     private void Update()
     {
@@ -106,7 +111,7 @@ public class GameNetworkManager : NetworkBehaviour
         _netRobotState.Value = (byte)FMS.RobotState;
     }
 
-    // ── Client: apply server FMS timer (LateUpdate runs after FMS.Update) ────
+    // ── Client: keep local FMS timer display accurate (runs after FMS.Update) ─
 
     private void LateUpdate()
     {
@@ -114,21 +119,18 @@ public class GameNetworkManager : NetworkBehaviour
             FMS.MatchTimer = _netMatchTimer.Value;
     }
 
-    // ── Server: apply red robot inputs received from client ───────────────────
+    // ── Server: apply client joystick input to the correct robot ─────────────
 
-    // RequireOwnership=false so any client can call this RPC.
-    // Delivery=Unreliable keeps input lag minimal; stale frames are harmless.
     [ServerRpc(RequireOwnership = false, Delivery = RpcDelivery.Unreliable)]
     public void SendRobotInputServerRpc(int slot, float tx, float ty, float rx)
     {
         if (_loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        // disruptable:false prevents the host's own gamepad from overriding network input
         robot.GetComponent<SwerveController>()?.overideInputs(tx, ty, rx, disruptable: false);
     }
 
-    // ── Server: broadcast robot transforms to clients ─────────────────────────
+    // ── Server: broadcast all robot transforms to clients ────────────────────
 
     private void FixedUpdate()
     {
@@ -139,17 +141,17 @@ public class GameNetworkManager : NetworkBehaviour
         if (_loadMatch == null) return;
         if (NetworkManager.ConnectedClientsList.Count <= 1) return;
 
-        var p0 = GetRobotPos(0); var r0 = GetRobotRot(0); var v0 = GetRobotVel(0);
-        var p1 = GetRobotPos(1); var r1 = GetRobotRot(1); var v1 = GetRobotVel(1);
-        var p2 = GetRobotPos(2); var r2 = GetRobotRot(2); var v2 = GetRobotVel(2);
-        var p3 = GetRobotPos(3); var r3 = GetRobotRot(3); var v3 = GetRobotVel(3);
-
-        SyncRobotsClientRpc(p0, r0, v0, p1, r1, v1, p2, r2, v2, p3, r3, v3);
+        SyncRobotsClientRpc(
+            GetRobotPos(0), GetRobotRot(0), GetRobotVel(0),
+            GetRobotPos(1), GetRobotRot(1), GetRobotVel(1),
+            GetRobotPos(2), GetRobotRot(2), GetRobotVel(2),
+            GetRobotPos(3), GetRobotRot(3), GetRobotVel(3)
+        );
     }
 
-    private Vector3    GetRobotPos(int slot) { var r = _loadMatch.GetRobotLoaded(slot); return r != null ? r.transform.position    : Vector3.zero; }
-    private Quaternion GetRobotRot(int slot) { var r = _loadMatch.GetRobotLoaded(slot); return r != null ? r.transform.rotation    : Quaternion.identity; }
-    private Vector3    GetRobotVel(int slot) { var r = _loadMatch.GetRobotLoaded(slot); if (r == null) return Vector3.zero; var rb = r.GetComponent<Rigidbody>(); return rb != null ? rb.velocity : Vector3.zero; }
+    private Vector3    GetRobotPos(int s) { var r = _loadMatch.GetRobotLoaded(s); return r != null ? r.transform.position : Vector3.zero; }
+    private Quaternion GetRobotRot(int s) { var r = _loadMatch.GetRobotLoaded(s); return r != null ? r.transform.rotation : Quaternion.identity; }
+    private Vector3    GetRobotVel(int s) { var r = _loadMatch.GetRobotLoaded(s); if (r == null) return Vector3.zero; var rb = r.GetComponent<Rigidbody>(); return rb != null ? rb.velocity : Vector3.zero; }
 
     [ClientRpc]
     private void SyncRobotsClientRpc(
@@ -159,29 +161,22 @@ public class GameNetworkManager : NetworkBehaviour
         Vector3 p3, Quaternion r3, Vector3 v3)
     {
         if (IsHost || _loadMatch == null) return;
-
-        ApplyRobot(0, p0, r0, v0);
-        ApplyRobot(1, p1, r1, v1);
-        ApplyRobot(2, p2, r2, v2);
-        ApplyRobot(3, p3, r3, v3);
+        ApplyRobot(0, p0, r0);
+        ApplyRobot(1, p1, r1);
+        ApplyRobot(2, p2, r2);
+        ApplyRobot(3, p3, r3);
     }
 
-    private void ApplyRobot(int slot, Vector3 pos, Quaternion rot, Vector3 vel)
+    private void ApplyRobot(int slot, Vector3 pos, Quaternion rot)
     {
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-
         robot.transform.SetPositionAndRotation(pos, rot);
-
         var rb = robot.GetComponent<Rigidbody>();
-        if (rb != null && rb.isKinematic)
-        {
-            rb.position = pos;
-            rb.rotation = rot;
-        }
+        if (rb != null && rb.isKinematic) { rb.position = pos; rb.rotation = rot; }
     }
 
-    // ── Client: read local red-alliance input and forward to host ─────────────
+    // ── Client: read local input and forward to host ──────────────────────────
 
     private IEnumerator InputSendLoop()
     {
@@ -191,19 +186,19 @@ public class GameNetworkManager : NetworkBehaviour
         while (IsClient && !IsHost)
         {
             yield return waitFixed;
-
             if (++tick < robotSyncEveryNFixed) continue;
             tick = 0;
 
-            // Client controls red alliance: slots 2-3
-            SendInputForSlot(2);
-            SendInputForSlot(3);
+            var mode = (PlayMode)_netPlayMode.Value;
+            var (first, last) = ClientSlots(mode);
+            for (int i = first; i <= last; i++)
+                SendInputForSlot(i);
         }
     }
 
     private void SendInputForSlot(int slot)
     {
-        if (_loadMatch == null) return;
+        if (slot < 0 || _loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
 
