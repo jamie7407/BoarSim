@@ -39,6 +39,11 @@ public class GameNetworkManager : NetworkBehaviour
         NetworkVariableReadPermission.Everyone,
         NetworkVariableWritePermission.Server);
 
+    private readonly NetworkVariable<int> _netBlueScore = new(
+        0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    private readonly NetworkVariable<int> _netRedScore = new(
+        0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
 
@@ -111,12 +116,14 @@ public class GameNetworkManager : NetworkBehaviour
     {
         if (!IsSpawned) return;
 
-        // Server: push FMS state into NetworkVariables
+        // Server: push FMS + score state into NetworkVariables
         if (IsServer)
         {
             _netMatchTimer.Value = FMS.MatchTimer;
             _netMatchState.Value = (byte)FMS.MatchState;
             _netRobotState.Value = (byte)FMS.RobotState;
+            _netBlueScore.Value  = ScoreHolder.BlueScore;
+            _netRedScore.Value   = ScoreHolder.RedScore;
         }
 
         // Wait for IsInputReady (PairInputs done) before applying role config —
@@ -139,18 +146,20 @@ public class GameNetworkManager : NetworkBehaviour
     private void LateUpdate()
     {
         if (IsClient && !IsHost)
-            FMS.MatchTimer = _netMatchTimer.Value;
+        {
+            FMS.MatchTimer        = _netMatchTimer.Value;
+            ScoreHolder.BlueScore = _netBlueScore.Value;
+            ScoreHolder.RedScore  = _netRedScore.Value;
+        }
     }
 
     private void ApplyRoleToLoadedMatch()
     {
-        var mode = (PlayMode)_netPlayMode.Value;
-
         if (IsHost)
         {
             // Re-publish play mode in case it changed since OnNetworkSpawn
             _netPlayMode.Value = (byte)_loadMatch.GetSettingsCopy().playMode;
-            mode = (PlayMode)_netPlayMode.Value;
+            var mode = (PlayMode)_netPlayMode.Value;
 
             // Only rebind cameras/input when a client is actually connected
             if (NetworkManager.ConnectedClientsList.Count > 1)
@@ -158,7 +167,9 @@ public class GameNetworkManager : NetworkBehaviour
         }
         else
         {
-            // Client always rebinds — host may have started match first
+            // Read mode from local settings applied by SyncAndStartMatchClientRpc rather than
+            // from _netPlayMode, which may not have propagated from the host yet at this point.
+            var mode = (PlayMode)_loadMatch.GetSettingsCopy().playMode;
             _loadMatch.RebindForNetworkPlay(false, mode);
         }
     }
@@ -233,7 +244,10 @@ public class GameNetworkManager : NetworkBehaviour
             if (++tick < robotSyncEveryNFixed) continue;
             tick = 0;
 
-            var mode = (PlayMode)_netPlayMode.Value;
+            // Use local settings (same propagation-delay fix as ApplyRoleToLoadedMatch).
+            var mode = _loadMatch != null
+                ? (PlayMode)_loadMatch.GetSettingsCopy().playMode
+                : (PlayMode)_netPlayMode.Value;
             var (first, last) = ClientSlots(mode);
             for (int i = first; i <= last; i++)
                 SendInputForSlot(i);

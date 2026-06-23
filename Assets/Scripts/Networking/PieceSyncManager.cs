@@ -31,8 +31,9 @@ public class PieceSyncManager : NetworkBehaviour
     [Tooltip("Re-send full registration so newly spawned pieces get mapped")]
     [SerializeField] private float registrationInterval = 5f;
 
-    private const string MSG_REG   = "BoarSim.PieceReg";
-    private const string MSG_DELTA = "BoarSim.PieceDelta";
+    private const string MSG_REG    = "BoarSim.PieceReg";
+    private const string MSG_DELTA  = "BoarSim.PieceDelta";
+    private const string MSG_DELETE = "BoarSim.PieceDelete";
 
     // Server-side state
     private readonly Dictionary<GamePiece, ushort> _serverIds = new();
@@ -40,6 +41,7 @@ public class PieceSyncManager : NetworkBehaviour
     private GamePiece[] _serverPieces = System.Array.Empty<GamePiece>();
     private readonly Dictionary<ushort, Vector3>    _lastSentPos = new();
     private readonly Dictionary<ushort, Quaternion> _lastSentRot = new();
+    private readonly HashSet<ushort> _pendingDeleteIds = new();
     private int _fixedTick;
 
     // Client-side state
@@ -57,8 +59,9 @@ public class PieceSyncManager : NetworkBehaviour
 
         if (IsClient && !IsServer)
         {
-            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,   OnRegistrationReceived);
-            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELTA, OnDeltaReceived);
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,    OnRegistrationReceived);
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELTA,  OnDeltaReceived);
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
             StartCoroutine(MakeClientPiecesKinematic());
         }
     }
@@ -69,6 +72,7 @@ public class PieceSyncManager : NetworkBehaviour
         {
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_REG);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELTA);
+            NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELETE);
         }
     }
 
@@ -83,7 +87,10 @@ public class PieceSyncManager : NetworkBehaviour
         {
             RefreshServerPieces();
             if (NetworkManager.ConnectedClientsList.Count > 1)
+            {
                 SendRegistration();
+                SendDeletions();
+            }
             yield return new WaitForSeconds(registrationInterval);
         }
     }
@@ -91,11 +98,37 @@ public class PieceSyncManager : NetworkBehaviour
     private void RefreshServerPieces()
     {
         _serverPieces = FindObjectsOfType<GamePiece>();
+        var found = new HashSet<GamePiece>(_serverPieces);
+
+        // Detect pieces that were registered but have since been destroyed (e.g. scored).
+        var stale = new List<GamePiece>();
+        foreach (var kvp in _serverIds)
+        {
+            if (kvp.Key == null || !found.Contains(kvp.Key))
+            {
+                _pendingDeleteIds.Add(kvp.Value);
+                stale.Add(kvp.Key);
+            }
+        }
+        foreach (var k in stale) _serverIds.Remove(k);
+
         foreach (var piece in _serverPieces)
         {
             if (!_serverIds.ContainsKey(piece))
                 _serverIds[piece] = _nextId++;
         }
+    }
+
+    private void SendDeletions()
+    {
+        if (_pendingDeleteIds.Count == 0) return;
+        int bufSize = 2 + _pendingDeleteIds.Count * 2;
+        using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
+        writer.WriteValueSafe((ushort)_pendingDeleteIds.Count);
+        foreach (var id in _pendingDeleteIds)
+            writer.WriteValueSafe(id);
+        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELETE, writer, NetworkDelivery.Reliable);
+        _pendingDeleteIds.Clear();
     }
 
     private void SendRegistration()
@@ -146,23 +179,25 @@ public class PieceSyncManager : NetworkBehaviour
             if (piece == null || piece.rb == null) continue;
             if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
 
-            // Stationary = held by a robot; follows robot transform synced by GameNetworkManager
-            if (piece.state == GamePieceState.Stationary) continue;
+            bool isStationary = piece.state == GamePieceState.Stationary;
 
-            var pos      = piece.rb.position;
-            var rot      = piece.rb.rotation;
-            bool sleeping = piece.rb.IsSleeping();
+            // Stationary pieces (held by robot) are no longer skipped — they need to be
+            // synced so the other screen sees the pickup. They are sent as "sleeping"
+            // (no velocity data) since they move with the robot, not independently.
+            bool sleeping = !isStationary && piece.rb.IsSleeping();
 
-            // Skip sleeping pieces whose position/rotation hasn't changed since last send
-            if (sleeping
-                && _lastSentPos.TryGetValue(id, out var lp)
-                && _lastSentRot.TryGetValue(id, out var lr)
-                && (pos - lp).sqrMagnitude < 0.0001f          // 1 cm²
-                && Quaternion.Dot(rot, lr) > 0.9999f)
-            {
-                continue;
-            }
+            // Skip pieces whose position/rotation hasn't changed: sleeping world pieces
+            // and stationary pieces on a non-moving robot both qualify.
+            bool posUnchanged =
+                _lastSentPos.TryGetValue(id, out var lp) &&
+                _lastSentRot.TryGetValue(id, out var lr) &&
+                (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
+                Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
+            if (posUnchanged && (sleeping || isStationary)) continue;
+
+            var pos = piece.rb.position;
+            var rot = piece.rb.rotation;
             _lastSentPos[id] = pos;
             _lastSentRot[id] = rot;
 
@@ -276,10 +311,26 @@ public class PieceSyncManager : NetworkBehaviour
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
                 continue;
 
-            piece.rb.position         = new Vector3(px, py, pz);
-            piece.rb.rotation         = new Quaternion(rx, ry, rz, rw);
-            piece.rb.velocity         = vel;
-            piece.rb.angularVelocity  = angVel;
+            piece.rb.position        = new Vector3(px, py, pz);
+            piece.rb.rotation        = new Quaternion(rx, ry, rz, rw);
+            piece.rb.velocity        = vel;
+            piece.rb.angularVelocity = angVel;
+        }
+    }
+
+    // ── Client: receive piece deletions (scored/removed on server) ────────────
+
+    private void OnDeleteReceived(ulong senderId, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out ushort count);
+        for (int i = 0; i < count; i++)
+        {
+            reader.ReadValueSafe(out ushort id);
+            if (_clientMap.TryGetValue(id, out var piece))
+            {
+                _clientMap.Remove(id);
+                if (piece != null) Destroy(piece.gameObject);
+            }
         }
     }
 }
