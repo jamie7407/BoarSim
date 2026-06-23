@@ -188,6 +188,18 @@ public class GameNetworkManager : NetworkBehaviour
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
             MakeChildRigidbodiesKinematic();
+
+            // Host is authoritative for ALL robot physics. Make every root Rigidbody
+            // kinematic so SyncRobotsClientRpc drives it cleanly via rb.position/rb.rotation.
+            // Without this P2's non-kinematic root fights the host position every frame,
+            // causing the glitch-then-revert behaviour.
+            for (int slot = 0; slot < 4; slot++)
+            {
+                var robot = _loadMatch.GetRobotLoaded(slot);
+                if (robot == null) continue;
+                var rb = robot.GetComponent<Rigidbody>();
+                if (rb != null) rb.isKinematic = true;
+            }
         }
     }
 
@@ -304,15 +316,20 @@ public class GameNetworkManager : NetworkBehaviour
 
     // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots
     // into a single unreliable custom message.  Client receives and sets kinematic joints.
+    // Positions are sent in robot-root-local space so the client can reconvert to world using
+    // its own (already-synced) root transform — this eliminates the trailing artifact that
+    // occurs when the root and joint syncs arrive in different physics frames.
     private void SendJointSync()
     {
         // First pass: collect filtered Rigidbody lists so we know exact buffer size.
-        var perSlot = new System.Collections.Generic.List<Rigidbody>[4];
+        var perSlot       = new System.Collections.Generic.List<Rigidbody>[4];
+        var slotTransform = new Transform[4];
         int totalBytes = 0;
         for (int slot = 0; slot < 4; slot++)
         {
             var robot = _loadMatch.GetRobotLoaded(slot);
             if (robot == null) continue;
+            slotTransform[slot] = robot.transform;
             var rootRb = robot.GetComponent<Rigidbody>();
             var buf = new System.Collections.Generic.List<Rigidbody>();
             foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
@@ -324,22 +341,25 @@ public class GameNetworkManager : NetworkBehaviour
             if (buf.Count == 0) continue;
             perSlot[slot] = buf;
             int clamped = Mathf.Min(buf.Count, 255);
-            totalBytes += 2 + clamped * 28; // header (slot+count) + joints (pos+rot)
+            totalBytes += 2 + clamped * 28; // header (slot+count) + joints (localPos+localRot)
         }
         if (totalBytes == 0) return;
 
         using var writer = new FastBufferWriter(totalBytes, Allocator.Temp);
         for (int slot = 0; slot < 4; slot++)
         {
-            var buf = perSlot[slot];
-            if (buf == null) continue;
+            var buf     = perSlot[slot];
+            var robotTx = slotTransform[slot];
+            if (buf == null || robotTx == null) continue;
             writer.WriteValueSafe((byte)slot);
             writer.WriteValueSafe((byte)Mathf.Min(buf.Count, 255));
             int limit = Mathf.Min(buf.Count, 255);
+            var invRot = Quaternion.Inverse(robotTx.rotation);
             for (int j = 0; j < limit; j++)
             {
-                var p = buf[j].position;
-                var q = buf[j].rotation;
+                // Convert to root-local space so the client can apply relative to its own root.
+                var p = robotTx.InverseTransformPoint(buf[j].position);
+                var q = invRot * buf[j].rotation;
                 writer.WriteValueSafe(p.x); writer.WriteValueSafe(p.y); writer.WriteValueSafe(p.z);
                 writer.WriteValueSafe(q.x); writer.WriteValueSafe(q.y); writer.WriteValueSafe(q.z); writer.WriteValueSafe(q.w);
             }
@@ -350,6 +370,9 @@ public class GameNetworkManager : NetworkBehaviour
     }
 
     // Client: receive joint positions from host and apply to kinematic joint Rigidbodies.
+    // Positions arrive in robot-root-local space (see SendJointSync); we reconvert to world
+    // using the client's current root transform so joints track the robot regardless of
+    // when the root and joint syncs land relative to each other.
     private void OnJointSyncReceived(ulong senderId, FastBufferReader reader)
     {
         if (_loadMatch == null) return;
@@ -359,8 +382,9 @@ public class GameNetworkManager : NetworkBehaviour
             reader.ReadValueSafe(out byte slot);
             reader.ReadValueSafe(out byte jointCount);
 
-            var robot  = _loadMatch.GetRobotLoaded(slot);
-            var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
+            var robot   = _loadMatch.GetRobotLoaded(slot);
+            var rootRb  = robot != null ? robot.GetComponent<Rigidbody>() : null;
+            var robotTx = robot != null ? robot.transform : null;
 
             // Pre-build the filtered list in the same order as SendJointSync (O(n) total).
             Rigidbody[] filtered = System.Array.Empty<Rigidbody>();
@@ -382,11 +406,13 @@ public class GameNetworkManager : NetworkBehaviour
                 reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
                 reader.ReadValueSafe(out float qx); reader.ReadValueSafe(out float qy); reader.ReadValueSafe(out float qz); reader.ReadValueSafe(out float qw);
 
-                if (j >= filtered.Length) continue;
+                if (j >= filtered.Length || robotTx == null) continue;
                 var rb = filtered[j];
                 if (rb == null || !rb.isKinematic) continue;
-                rb.position = new Vector3(px, py, pz);
-                rb.rotation = new Quaternion(qx, qy, qz, qw);
+
+                // Reconvert root-local → world using the client's current root transform.
+                rb.position = robotTx.TransformPoint(new Vector3(px, py, pz));
+                rb.rotation = robotTx.rotation * new Quaternion(qx, qy, qz, qw);
             }
         }
     }
