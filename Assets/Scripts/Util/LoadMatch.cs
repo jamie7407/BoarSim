@@ -832,26 +832,39 @@ public class LoadMatch : MonoBehaviour
         // Pair blue alliance robots (P1, P2) the same way as TwoVsZero/OneVsOne.
         PairTwoRobots(pads);
 
-        // Pair red alliance robots (P3, P4) to gamepads 2 and 3.
+        // Keyboard is claimed by P2 when only one gamepad is connected.
+        bool keyboardClaimed = pads.Count < 2 && Keyboard.current != null;
+
+        // P3 — gamepad 2, or keyboard if free, or disabled
         if (_activeRobot3 != null)
         {
             if (pads.Count >= 3)
                 BindRobotToGamepad(_activeRobot3, pads[2], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot3, keyboardControlScheme);
+                keyboardClaimed = true;
+            }
             else
             {
                 DisableRobotInput(_activeRobot3);
-                Debug.LogWarning("Player 3 has no gamepad — robot disabled. Connect a 3rd gamepad for 2v2.");
+                Debug.LogWarning("Player 3 has no available input device.");
             }
         }
 
+        // P4 — gamepad 3, or keyboard if free, or disabled
         if (_activeRobot4 != null)
         {
             if (pads.Count >= 4)
                 BindRobotToGamepad(_activeRobot4, pads[3], gamepadControlScheme);
+            else if (!keyboardClaimed && Keyboard.current != null)
+            {
+                BindRobotToKeyboard(_activeRobot4, keyboardControlScheme);
+            }
             else
             {
                 DisableRobotInput(_activeRobot4);
-                Debug.LogWarning("Player 4 has no gamepad — robot disabled. Connect a 4th gamepad for 2v2.");
+                Debug.LogWarning("Player 4 has no available input device.");
             }
         }
     }
