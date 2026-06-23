@@ -63,12 +63,20 @@ public class GameNetworkManager : NetworkBehaviour
         if (IsHost)
         {
             _netPlayMode.Value = (byte)_loadMatch.GetSettingsCopy().playMode;
-            // Re-apply if a client connects after the match has already started
             NetworkManager.OnClientConnectedCallback += OnClientConnected;
         }
 
         if (IsClient && !IsHost)
+        {
             StartCoroutine(InputSendLoop());
+            // Re-apply role config if the host publishes the play mode after
+            // we've already run (e.g. mode was still default when robots loaded).
+            _netPlayMode.OnValueChanged += (_, _) =>
+            {
+                if (_roleApplied && _loadMatch != null)
+                    ApplyRoleToLoadedMatch();
+            };
+        }
     }
 
     public override void OnNetworkDespawn()
@@ -100,10 +108,11 @@ public class GameNetworkManager : NetworkBehaviour
             _netRobotState.Value = (byte)FMS.RobotState;
         }
 
-        // Detect robots loading / unloading and configure role each time
+        // Wait for IsInputReady (PairInputs done) before applying role config —
+        // otherwise SetupInputsWhenReady finishes after us and overwrites our bindings.
         if (_loadMatch != null)
         {
-            bool robotsReady = _loadMatch.GetRobotLoaded(0) != null;
+            bool robotsReady = _loadMatch.GetRobotLoaded(0) != null && _loadMatch.IsInputReady;
             if (robotsReady && !_roleApplied)
             {
                 _roleApplied = true;
@@ -111,7 +120,7 @@ public class GameNetworkManager : NetworkBehaviour
             }
             else if (!robotsReady)
             {
-                _roleApplied = false; // will re-apply after next ResetField
+                _roleApplied = false;
             }
         }
     }

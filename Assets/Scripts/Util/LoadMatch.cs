@@ -1116,6 +1116,10 @@ public class LoadMatch : MonoBehaviour
         };
     }
 
+    // True once SetupInputsWhenReady has finished calling PairInputs().
+    // GameNetworkManager waits for this before overriding device assignments.
+    public bool IsInputReady => _inputSetupCoroutine == null;
+
     // ── MODIFIED: returns all four robots ─────────────────────────────────
     public GameObject[] GetLoadedRobots()
     {
