@@ -51,6 +51,10 @@ namespace Util
         [SerializeField] private Button controlsButton;
         [SerializeField] private Button controlsBackButton;
 
+        [Header("Multiplayer (Online)")]
+        [SerializeField] private Button multiplayerButton;
+        [SerializeField] private NetworkLobbyUI multiplayerPanel;
+
         [Header("Input System")]
         [SerializeField] private InputActionReference toggleMenuAction;
         [SerializeField] private InputActionAsset fallbackActions;
@@ -258,6 +262,9 @@ namespace Util
             if (controlsButton != null) controlsButton.onClick.AddListener(OpenControls);
             if (controlsBackButton != null) controlsBackButton.onClick.AddListener(CloseControls);
 
+            if (multiplayerButton != null) multiplayerButton.onClick.AddListener(OpenMultiplayer);
+            if (multiplayerPanel != null) multiplayerPanel.OnBackClicked += CloseMultiplayer;
+
             if (gameModeDropdown != null)
                 gameModeDropdown.onValueChanged.AddListener(OnGameModeChanged);
             if (cameraDropdown != null)
@@ -438,6 +445,7 @@ namespace Util
                 loadMatch.ApplySettings(_workingSettings);
                 ResumeRuntimeState();
 
+                multiplayerPanel?.Close();
                 if (controlsRoot != null) controlsRoot.SetActive(false);
                 if (creditsRoot != null) creditsRoot.SetActive(false);
                 if (menuRoot != null) menuRoot.SetActive(false);
@@ -462,6 +470,7 @@ namespace Util
             {
                 ResumeRuntimeState();
 
+                multiplayerPanel?.Close();
                 if (controlsRoot != null) controlsRoot.SetActive(false);
                 if (creditsRoot != null) creditsRoot.SetActive(false);
                 if (menuRoot != null) menuRoot.SetActive(false);
@@ -546,6 +555,41 @@ namespace Util
             void Done() { _isTransitioning = false; }
             if (screenFader != null) screenFader.FadeToBlackThen(ShowMenu, true, Done);
             else { ShowMenu(); Done(); }
+        }
+
+        private void OpenMultiplayer()
+        {
+            if (_isTransitioning) return;
+            _isTransitioning = true;
+
+            void Show()
+            {
+                if (menuRoot     != null) menuRoot.SetActive(false);
+                if (creditsRoot  != null) creditsRoot.SetActive(false);
+                if (controlsRoot != null) controlsRoot.SetActive(false);
+                multiplayerPanel?.Open();
+            }
+
+            void Done() { _isTransitioning = false; }
+            if (screenFader != null) screenFader.FadeToBlackThen(Show, true, Done);
+            else { Show(); Done(); }
+        }
+
+        private void CloseMultiplayer()
+        {
+            if (_isTransitioning) return;
+            _isTransitioning = true;
+
+            void Show()
+            {
+                multiplayerPanel?.Close();
+                if (menuRoot != null) menuRoot.SetActive(true);
+                RefreshVisibleState(false);
+            }
+
+            void Done() { _isTransitioning = false; }
+            if (screenFader != null) screenFader.FadeToBlackThen(Show, true, Done);
+            else { Show(); Done(); }
         }
 
         private void ResumeRuntimeState()

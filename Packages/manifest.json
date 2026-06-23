@@ -2,6 +2,11 @@
   "dependencies": {
     "com.domybest.mybox": "https://github.com/Deadcows/MyBox.git",
     "com.unity.collab-proxy": "2.6.0",
+    "com.unity.netcode.gameobjects": "1.9.1",
+    "com.unity.services.authentication": "3.3.3",
+    "com.unity.services.core": "1.13.0",
+    "com.unity.services.relay": "1.1.1",
+    "com.unity.transport": "2.3.0",
     "com.unity.feature.development": "1.0.2",
     "com.unity.inputsystem": "1.7.0",
     "com.unity.recorder": "5.0.0",
