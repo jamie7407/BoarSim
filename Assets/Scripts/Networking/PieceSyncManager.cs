@@ -459,11 +459,34 @@ public class PieceSyncManager : NetworkBehaviour
             MSG_DETACH, writer, NetworkDelivery.Reliable);
     }
 
-    // ── Client: retry buffered attaches each frame ────────────────────────────
+    // ── Client: per-frame maintenance + pending attach retry ─────────────────
 
     private void Update()
     {
-        if (!IsClient || IsServer || _pendingAttaches.Count == 0) return;
+        if (!IsClient || IsServer) return;
+
+        // Mirror host BuildNode.Update() stowing behaviour: the host calls
+        // teleportTo(currentGamePiece, transform) every frame while holding a ball,
+        // which (a) disables colliders, (b) forces the ball to the node's world
+        // position (localPosition ≈ zero), and (c) re-asserts owner/state every frame.
+        // Without this continuous enforcement, anything that touches the ball's
+        // transform between delta ticks (physics glitch, late joint-sync tick, etc.)
+        // can visibly drift the ball away from the intake.
+        foreach (var id in _clientAttached)
+        {
+            if (!_clientMap.TryGetValue(id, out var ap) || ap == null) continue;
+
+            // Keep colliders disabled while held — host disables them every frame.
+            if (ap.colliderParent != null && ap.colliderParent.activeSelf)
+                ap.colliderParent.SetActive(false);
+
+            // Keep ball anchored to the node's local origin — host forces this via
+            // teleportTo every frame. Kinematic ball; no physics will fight us.
+            ap.transform.localPosition = Vector3.zero;
+            ap.transform.localRotation = Quaternion.identity;
+        }
+
+        if (_pendingAttaches.Count == 0) return;
         for (int i = _pendingAttaches.Count - 1; i >= 0; i--)
         {
             var (id, slot, nodeIdx, lp) = _pendingAttaches[i];
@@ -480,9 +503,18 @@ public class PieceSyncManager : NetworkBehaviour
         reader.ReadValueSafe(out byte slot);
         reader.ReadValueSafe(out byte nodeIdx);
         reader.ReadValueSafe(out float lx); reader.ReadValueSafe(out float ly); reader.ReadValueSafe(out float lz);
+        var lp = new Vector3(lx, ly, lz);
 
-        if (!ApplyPieceAttach(id, slot, nodeIdx, new Vector3(lx, ly, lz)))
-            _pendingAttaches.Add((id, slot, nodeIdx, new Vector3(lx, ly, lz)));
+        bool inMap = _clientMap.ContainsKey(id);
+        if (!ApplyPieceAttach(id, slot, nodeIdx, lp))
+        {
+            _pendingAttaches.Add((id, slot, nodeIdx, lp));
+            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} → PENDING (robot not loaded yet). inMap={inMap}");
+        }
+        else if (!_clientAttached.Contains(id))
+        {
+            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} → silently skipped (no local ball). inMap={inMap}");
+        }
     }
 
     // Returns true when the attach was definitively handled (success or skippable failure).
@@ -544,7 +576,19 @@ public class PieceSyncManager : NetworkBehaviour
             piece.rb.rotation = piece.transform.rotation;
         }
 
+        // Mirror host changeParent: set owner and state so any script that reads
+        // these fields (scoring triggers, aiming logic, etc.) sees the correct values.
+        piece.owner = node.transform;
+        piece.state = GamePieceState.Stationary;
+
+        // Mirror host BuildNode: keep currentGamePiece up-to-date so other scripts
+        // that query which ball the robot is holding (e.g. shooter, scoring zone) work
+        // correctly on the client without needing the host-only intake logic to run.
+        node.currentGamePiece = piece;
+        node.currentState     = NodeState.Stowing;
+
         _clientAttached.Add(id);
+        Debug.Log($"[Net][Client] Ball {id} attached to slot node[{nodeIdx}]. map={_clientMap.Count} attached={_clientAttached.Count}");
         return true;
     }
 
@@ -563,6 +607,16 @@ public class PieceSyncManager : NetworkBehaviour
 
         _clientAttached.Remove(id);
 
+        // Mirror host ReleaseToWorld: clear owner and state before unparenting.
+        var prevNode = piece.transform.parent?.GetComponent<BuildNode>();
+        if (prevNode != null && prevNode.currentGamePiece == piece)
+        {
+            prevNode.currentGamePiece = null;
+            prevNode.currentState     = NodeState.Stowing;
+        }
+        piece.owner = null;
+        piece.state = GamePieceState.World;
+
         // Re-enable colliders and restore to field parent so delta sync can drive it again.
         if (piece.colliderParent != null) piece.colliderParent.SetActive(true);
 
@@ -575,10 +629,11 @@ public class PieceSyncManager : NetworkBehaviour
         // between physics frames after the velocity is applied.
         if (piece.rb != null)
         {
-            piece.rb.isKinematic  = false;
+            piece.rb.isKinematic   = false;
             piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
             piece.rb.velocity      = shotVelocity;
         }
+        Debug.Log($"[Net][Client] Ball {id} detached. shotVel={shotVelocity} dynamic={piece.rb != null && !piece.rb.isKinematic}");
     }
 
     // ── Client: receive piece deletions (scored/removed on server) ────────────
