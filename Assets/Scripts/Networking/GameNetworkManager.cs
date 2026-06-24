@@ -164,7 +164,13 @@ public class GameNetworkManager : NetworkBehaviour
     {
         if (IsClient && !IsHost)
         {
+            // Override whatever FMS.Update() set this frame with the host-authoritative values.
+            // LateUpdate runs after Update, so this is the final value each frame.
+            // Without syncing MatchState/RobotState, both machines run independent state
+            // machines and auto/teleop/endgame transitions happen at different times.
             FMS.MatchTimer        = _netMatchTimer.Value;
+            FMS.MatchState        = (MatchState)_netMatchState.Value;
+            FMS.RobotState        = (RobotState)_netRobotState.Value;
             ScoreHolder.BlueScore = _netBlueScore.Value;
             ScoreHolder.RedScore  = _netRedScore.Value;
         }
@@ -219,8 +225,11 @@ public class GameNetworkManager : NetworkBehaviour
     {
         for (int slot = 0; slot < 4; slot++)
         {
-            _jointRbCache[slot] = null;
             var robot = _loadMatch.GetRobotLoaded(slot);
+            // Don't null-clear the cache for absent slots — stale refs are checked in
+            // OnJointSyncReceived (rb == null skips destroyed objects) and will be replaced
+            // when robots load. Clearing to null would cause joint sync to silently drop
+            // all packets for that slot until MakeChildRigidbodiesKinematic runs again.
             if (robot == null) continue;
             var rootRb = robot.GetComponent<Rigidbody>();
             var buf = new System.Collections.Generic.List<Rigidbody>();
@@ -464,10 +473,31 @@ public class GameNetworkManager : NetworkBehaviour
                 rootRb.rotation = rootRot;
             }
 
-            // Use the cached filtered list built in MakeChildRigidbodiesKinematic.
-            // Avoids GetComponentsInChildren + List allocation at 20 Hz.
-            Rigidbody[] filtered = (slot < _jointRbCache.Length ? _jointRbCache[slot] : null)
-                                   ?? System.Array.Empty<Rigidbody>();
+            // Use the cached filtered list when available; fall back to building on the fly
+            // if the cache hasn't been populated yet (startup window before robots are ready).
+            // The fallback result is stored in the cache so subsequent packets are fast.
+            Rigidbody[] filtered;
+            if (slot < _jointRbCache.Length && _jointRbCache[slot] != null)
+            {
+                filtered = _jointRbCache[slot];
+            }
+            else if (robot != null)
+            {
+                var allRbs = robot.GetComponentsInChildren<Rigidbody>();
+                var fbuf = new System.Collections.Generic.List<Rigidbody>(allRbs.Length);
+                foreach (var rb in allRbs)
+                {
+                    if (rb == rootRb) continue;
+                    if (rb.GetComponent<GamePiece>() != null) continue;
+                    fbuf.Add(rb);
+                }
+                filtered = fbuf.ToArray();
+                if (slot < _jointRbCache.Length) _jointRbCache[slot] = filtered;
+            }
+            else
+            {
+                filtered = System.Array.Empty<Rigidbody>();
+            }
 
             for (int j = 0; j < jointCount; j++)
             {

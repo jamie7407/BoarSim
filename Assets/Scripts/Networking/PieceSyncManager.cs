@@ -104,6 +104,10 @@ public class PieceSyncManager : NetworkBehaviour
             {
                 SendRegistration();
                 SendDeletions();
+                // Re-send attach messages for all currently-held balls so that a client
+                // joining mid-match (or reconnecting after registration) gets the correct
+                // parenting state. MSG_ATTACH is reliable so duplicates are harmless.
+                SendAttachForStationary();
             }
             yield return new WaitForSeconds(registrationInterval);
         }
@@ -214,12 +218,13 @@ public class PieceSyncManager : NetworkBehaviour
 
             // Detect hold/release transitions and notify clients so they can parent or
             // un-parent the ball, giving smooth 60 fps tracking instead of 20 Hz snaps.
-            if (_lastPieceState.TryGetValue(id, out var prevState))
-            {
-                bool wasStationary = prevState == GamePieceState.Stationary;
-                if (isStationary && !wasStationary) SendPieceAttach(id, piece);
-                else if (!isStationary && wasStationary) SendPieceDetach(id);
-            }
+            // If the piece isn't in _lastPieceState yet (first delta tick after connection
+            // or after a new match) treat it as "was not stationary" so preloaded balls that
+            // are already held get their MSG_ATTACH on the first tick.
+            bool wasStationary = _lastPieceState.TryGetValue(id, out var prevState) &&
+                                 prevState == GamePieceState.Stationary;
+            if (isStationary && !wasStationary) SendPieceAttach(id, piece);
+            else if (!isStationary && wasStationary) SendPieceDetach(id);
             _lastPieceState[id] = piece.state;
 
             // Stationary pieces (held by robot) are no longer skipped — they need to be
@@ -364,6 +369,16 @@ public class PieceSyncManager : NetworkBehaviour
     }
 
     // ── Server: send ball attach/detach to clients ────────────────────────────
+
+    private void SendAttachForStationary()
+    {
+        foreach (var piece in _serverPieces)
+        {
+            if (piece == null || piece.state != GamePieceState.Stationary) continue;
+            if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
+            SendPieceAttach(id, piece);
+        }
+    }
 
     private void SendPieceAttach(ushort id, GamePiece piece)
     {
