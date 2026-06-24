@@ -78,6 +78,24 @@ public class AutoAim : MonoBehaviour
     private PlayerInput _playerInput;
     private InputActionMap _inputMap;
     private List<Vector3> _allTargets = new List<Vector3>();
+
+    // Network activation forwarded from the client (host-side only).
+    // Set true while the client's button is held; cleared by SetNetworkActivate(false).
+    private bool _netActive;
+
+    public void SetNetworkActivate(bool active) { _netActive = active; }
+
+    // Returns whether the local activation button is held — used by GameNetworkManager
+    // to forward button state to the host via the mechanism bitmask.
+    public bool GetButtonHeld()
+    {
+        if (targetWhen != AimAtWhen.WhenPressing || _inputMap == null) return false;
+        var ca = _inputMap.FindAction(controllerButton.ToString());
+        var ka = _inputMap.FindAction(keyboardButton.ToString());
+        bool ch = ca != null && ca.IsPressed() && ca.activeControl?.device is Gamepad;
+        bool kh = ka != null && ka.IsPressed() && ka.activeControl?.device is Keyboard;
+        return ch || kh;
+    }
     
     private readonly List<AimRegion> _regions = new List<AimRegion>();
 
@@ -213,19 +231,20 @@ public class AutoAim : MonoBehaviour
 
     private bool CheckButtonCondition()
     {
+        if (_netActive) return true; // forwarded from client when PlayerInput is disabled
         if (_inputMap == null) return false;
 
         var controllerAction = _inputMap.FindAction(controllerButton.ToString());
         var keyboardAction = _inputMap.FindAction(keyboardButton.ToString());
-        
-        var controllerHeld = controllerAction != null && 
-                            controllerAction.IsPressed() && 
+
+        var controllerHeld = controllerAction != null &&
+                            controllerAction.IsPressed() &&
                             (controllerAction.activeControl?.device is Gamepad);
-                            
-        var keyboardHeld = keyboardAction != null && 
-                          keyboardAction.IsPressed() && 
+
+        var keyboardHeld = keyboardAction != null &&
+                          keyboardAction.IsPressed() &&
                           (keyboardAction.activeControl?.device is Keyboard);
-        
+
         return controllerHeld || keyboardHeld;
     }
 

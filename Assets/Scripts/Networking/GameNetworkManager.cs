@@ -235,8 +235,27 @@ public class GameNetworkManager : NetworkBehaviour
         if (_loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        // SetNetworkDrive: robot-centric path, no field-centric rotation, persistent until next call.
-        robot.GetComponent<SwerveController>()?.SetNetworkDrive(tx, ty, rx);
+        var swerve = robot.GetComponent<SwerveController>();
+        if (swerve == null) return;
+
+        float ndx = tx, ndy = ty; // default: robot-centric pass-through
+
+        if (swerve.fieldCentric)
+        {
+            // Apply field-centric rotation on the host using the robot's actual heading.
+            // Mirrors SwerveController.FixedUpdate's field-centric path so P2 gets the same
+            // driving feel as P1: forward on the stick always moves toward the far wall.
+            // driveInput matches SwerveController's construction from the translate action.
+            Vector3 driveInput = new Vector3(ty, 0f, tx);
+            float angle = swerve.isRed
+                ? robot.transform.localRotation.eulerAngles.y + 90f
+                : robot.transform.localRotation.eulerAngles.y + 270f;
+            Vector3 fr = Quaternion.AngleAxis(angle, Vector3.up) * driveInput;
+            // SetNetworkDrive(x, y, r) → _translateValue=(x,y) → driveInput=(y,0,x) → fwd=y, str=x
+            ndx = fr.z; ndy = fr.x;
+        }
+
+        swerve.SetNetworkDrive(ndx, ndy, rx);
     }
 
     // Server: apply client mechanism button presses to JointControllers.
@@ -256,12 +275,35 @@ public class GameNetworkManager : NetworkBehaviour
             if (jc.setPoints == null) continue;
             for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
             {
-                bool triggered = ((triggeredMask >> bit) & 1UL) != 0;
-                bool held      = ((heldMask      >> bit) & 1UL) != 0;
+                bool trig = ((triggeredMask >> bit) & 1UL) != 0;
+                bool held = ((heldMask      >> bit) & 1UL) != 0;
                 // Always call SetNetworkInput so held=false clears the held state
                 // on the JointController when the button is released.
-                jc.SetNetworkInput(sp, triggered, held);
+                jc.SetNetworkInput(sp, trig, held);
             }
+        }
+
+        // BuildNode actions — must use the same traversal order as SendMechInputForSlot.
+        var buildNodes = robot.GetComponentsInChildren<BuildNode>();
+        foreach (var bn in buildNodes)
+        {
+            if (bn.Actions == null) continue;
+            for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
+            {
+                bool trig = ((triggeredMask >> bit) & 1UL) != 0;
+                bool held = ((heldMask      >> bit) & 1UL) != 0;
+                bn.SetNetworkInput(a, trig, held);
+            }
+        }
+
+        // AutoAim — one bit per component; held=true means the client's button is pressed.
+        var autoAims = robot.GetComponentsInChildren<AutoAim>();
+        foreach (var aa in autoAims)
+        {
+            if (bit >= 64) break;
+            bool held = ((heldMask >> bit) & 1UL) != 0;
+            aa.SetNetworkActivate(held);
+            bit++;
         }
     }
 
@@ -528,6 +570,38 @@ public class GameNetworkManager : NetworkBehaviour
                 if (t) triggered |= 1UL << bit;
                 if (h) held      |= 1UL << bit;
             }
+        }
+
+        // BuildNode actions (intake, transfer, score, etc.)
+        var buildNodes = robot.GetComponentsInChildren<BuildNode>();
+        foreach (var bn in buildNodes)
+        {
+            if (bn.Actions == null) continue;
+            for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
+            {
+                var action = bn.Actions[a];
+                if (!action.InputRequired)
+                {
+                    held |= 1UL << bit; // AlwaysPerform — always held
+                    continue;
+                }
+                var ca = actionMap.FindAction(action.ControllerButton.ToString());
+                var ka = actionMap.FindAction(action.KeyboardButton.ToString());
+                bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
+                bool h = (ca?.IsPressed() ?? false) || (ka?.IsPressed() ?? false);
+                if (t) triggered |= 1UL << bit;
+                if (h) held      |= 1UL << bit;
+            }
+        }
+
+        // AutoAim — one bit per component: forward the local button-held state so the
+        // host can activate its own PID loop even with PlayerInput disabled for P2.
+        var autoAims = robot.GetComponentsInChildren<AutoAim>();
+        foreach (var aa in autoAims)
+        {
+            if (bit >= 64) break;
+            if (aa.GetButtonHeld()) held |= 1UL << bit;
+            bit++;
         }
 
         // Always send so the server sees held=false when the button is released.

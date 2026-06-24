@@ -34,6 +34,25 @@ public class BuildNode : MonoBehaviour
     private Vector3 _lastIntakePosition;
     private Quaternion _lastIntakeRotation;
 
+    // Network-forwarded button state from the client (host-side only).
+    // Mirrors JointController.SetNetworkInput — triggered is one-shot (cleared after Update),
+    // held reflects current client state and is always sent to clear on release.
+    private bool[] _netTriggered;
+    private bool[] _netHeld;
+
+    public void SetNetworkInput(int actionIdx, bool triggered, bool held)
+    {
+        if (Actions == null || Actions.Length == 0) return;
+        if (_netTriggered == null || _netTriggered.Length != Actions.Length)
+        {
+            _netTriggered = new bool[Actions.Length];
+            _netHeld      = new bool[Actions.Length];
+        }
+        if (actionIdx < 0 || actionIdx >= Actions.Length) return;
+        if (triggered) _netTriggered[actionIdx] = true;
+        _netHeld[actionIdx] = held;
+    }
+
     private void Start()
     {
         if (!Application.isPlaying) return;
@@ -183,6 +202,14 @@ public class BuildNode : MonoBehaviour
             {
                 buttonPressed = true;
                 buttonHeld = true;
+            }
+
+            // OR in network-forwarded inputs from the client (host-side only).
+            if (_netTriggered != null && i < _netTriggered.Length)
+            {
+                buttonPressed    |= _netTriggered[i];
+                buttonHeld       |= _netHeld[i];
+                _netTriggered[i]  = false;
             }
 
             switch (action.Type)

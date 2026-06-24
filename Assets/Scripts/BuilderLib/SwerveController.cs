@@ -54,16 +54,18 @@ public class SwerveController : MonoBehaviour
 
     private bool inputsOveridable;
 
-    // Network drive — set every FixedUpdate by GameNetworkManager from client input.
-    // Bypasses field-centric rotation and per-frame expiry so the client-controlled
-    // robot drives at full speed in robot-centric coordinates (same as fieldCentric=false).
+    // Network drive — set by GameNetworkManager from client input each FixedUpdate.
+    // Field-centric rotation is pre-applied by the host ServerRpc before calling this,
+    // so the values here go directly to fwd/str without further rotation.
+    // _isNetworkControlled is set once and persists so timing jitter between FixedUpdate
+    // and the ServerRpc arriving in Update can never produce a "missed input" frame.
     private float _netDriveX, _netDriveY, _netDriveR;
-    private bool _useNetworkDrive;
+    private bool _isNetworkControlled;
 
     public void SetNetworkDrive(float x, float y, float r)
     {
         _netDriveX = x; _netDriveY = y; _netDriveR = r;
-        _useNetworkDrive = true;
+        _isNetworkControlled = true;
     }
 
     private float length;
@@ -152,11 +154,7 @@ public class SwerveController : MonoBehaviour
     void FixedUpdate()
     {
         //update controls
-        // Capture and clear before the input block so both branches see the same flag.
-        bool usingNetworkDrive = _useNetworkDrive;
-        _useNetworkDrive = false;
-
-        if (usingNetworkDrive)
+        if (_isNetworkControlled)
         {
             // Host-forwarded client input: robot-centric, no field rotation, no per-frame expiry.
             _translateValue = new Vector2(_netDriveX, _netDriveY);
@@ -199,9 +197,10 @@ public class SwerveController : MonoBehaviour
 
         float fwd, str;
 
-        if (usingNetworkDrive)
+        if (_isNetworkControlled)
         {
-            // Robot-centric: raw stick values map directly to forward/strafe, no heading rotation.
+            // Field-centric rotation was pre-applied by the host's SendRobotInputServerRpc,
+            // so these values go directly to fwd/str at full velocityMp.
             fwd = driveInput.x * velocityMp;
             str = driveInput.z * velocityMp;
         }
