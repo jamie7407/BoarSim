@@ -576,7 +576,6 @@ public class GameNetworkManager : NetworkBehaviour
         if (actionMap == null) return;
 
         var joints = robot.GetComponentsInChildren<JointController>();
-        if (joints.Length == 0) return;
 
         ulong triggered = 0, held = 0;
         int bit = 0;
@@ -591,6 +590,8 @@ public class GameNetworkManager : NetworkBehaviour
 
                 bool t = (ctrlAction?.triggered ?? false) || (kbAction?.triggered ?? false);
                 bool h = (ctrlAction?.IsPressed() ?? false) || (kbAction?.IsPressed() ?? false);
+
+                jc.SetNetworkInput(sp, t, h);
 
                 if (t) triggered |= 1UL << bit;
                 if (h) held      |= 1UL << bit;
@@ -614,6 +615,9 @@ public class GameNetworkManager : NetworkBehaviour
                 var ka = actionMap.FindAction(action.KeyboardButton.ToString());
                 bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
                 bool h = (ca?.IsPressed() ?? false) || (ka?.IsPressed() ?? false);
+
+                bn.SetNetworkInput(a, t, h);
+                
                 if (t) triggered |= 1UL << bit;
                 if (h) held      |= 1UL << bit;
             }
