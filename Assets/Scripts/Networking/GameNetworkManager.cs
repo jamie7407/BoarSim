@@ -52,10 +52,6 @@ public class GameNetworkManager : NetworkBehaviour
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
 
-    // Per-slot filtered joint RB arrays built once in MakeChildRigidbodiesKinematic.
-    // Avoids GetComponentsInChildren + List allocation on every incoming joint-sync packet.
-    private readonly Rigidbody[][] _jointRbCache = new Rigidbody[4][];
-
     // Tracks the LoadMatch.SetupVersion for which we last applied role config.
     // Using version instead of a bool means a new ResetField() always triggers
     // re-application even when the setup coroutine completes in the same frame.
@@ -217,31 +213,25 @@ public class GameNetworkManager : NetworkBehaviour
         }
     }
 
-    // Sets every non-root, non-GamePiece Rigidbody on every loaded robot kinematic and
-    // caches the filtered list so OnJointSyncReceived doesn't rebuild it every packet.
-    // GamePiece RBs are excluded here because they're handled by PieceSyncManager and
-    // made kinematic in GamePiece.Start() on the client.
+    // Makes every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
+    // Called from ApplyRoleToLoadedMatch as early as possible so joints are ready before
+    // the first joint-sync packet arrives. OnJointSyncReceived also sets kinematic inline
+    // as a belt-and-suspenders in case this runs after the first packets.
+    // GamePiece RBs are excluded — they're handled by PieceSyncManager.
     private void MakeChildRigidbodiesKinematic()
     {
         for (int slot = 0; slot < 4; slot++)
         {
             var robot = _loadMatch.GetRobotLoaded(slot);
-            // Don't null-clear the cache for absent slots — stale refs are checked in
-            // OnJointSyncReceived (rb == null skips destroyed objects) and will be replaced
-            // when robots load. Clearing to null would cause joint sync to silently drop
-            // all packets for that slot until MakeChildRigidbodiesKinematic runs again.
             if (robot == null) continue;
             var rootRb = robot.GetComponent<Rigidbody>();
-            var buf = new System.Collections.Generic.List<Rigidbody>();
             foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
             {
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
                 rb.interpolation = RigidbodyInterpolation.None;
-                buf.Add(rb);
             }
-            _jointRbCache[slot] = buf.ToArray();
         }
     }
 
@@ -473,15 +463,12 @@ public class GameNetworkManager : NetworkBehaviour
                 rootRb.rotation = rootRot;
             }
 
-            // Use the cached filtered list when available; fall back to building on the fly
-            // if the cache hasn't been populated yet (startup window before robots are ready).
-            // The fallback result is stored in the cache so subsequent packets are fast.
+            // Build filtered joint list on the fly every packet.
+            // Making RBs kinematic inline means correctness doesn't depend on
+            // MakeChildRigidbodiesKinematic having already run — the first packet
+            // where the robot is loaded will flip them kinematic immediately.
             Rigidbody[] filtered;
-            if (slot < _jointRbCache.Length && _jointRbCache[slot] != null)
-            {
-                filtered = _jointRbCache[slot];
-            }
-            else if (robot != null)
+            if (robot != null)
             {
                 var allRbs = robot.GetComponentsInChildren<Rigidbody>();
                 var fbuf = new System.Collections.Generic.List<Rigidbody>(allRbs.Length);
@@ -489,10 +476,16 @@ public class GameNetworkManager : NetworkBehaviour
                 {
                     if (rb == rootRb) continue;
                     if (rb.GetComponent<GamePiece>() != null) continue;
+                    // Flip kinematic here if MakeChildRigidbodiesKinematic hasn't fired yet.
+                    // Without this, rb.position is ignored and physics overrides the transform.
+                    if (!rb.isKinematic)
+                    {
+                        rb.isKinematic = true;
+                        rb.interpolation = RigidbodyInterpolation.None;
+                    }
                     fbuf.Add(rb);
                 }
                 filtered = fbuf.ToArray();
-                if (slot < _jointRbCache.Length) _jointRbCache[slot] = filtered;
             }
             else
             {
@@ -511,14 +504,12 @@ public class GameNetworkManager : NetworkBehaviour
 
                 var worldPos = new Vector3(px, py, pz);
                 var worldRot = new Quaternion(qx, qy, qz, qw);
-                // Update physics position and also set transform directly for immediate visual
-                // (rb.position alone defers the visual update until the next FixedUpdate).
+                // Set both transform (immediate visual) and rb.position (physics engine).
+                // Both are needed: transform for this frame's render, rb.position so the
+                // physics engine agrees and doesn't snap back on the next FixedUpdate.
                 rb.transform.SetPositionAndRotation(worldPos, worldRot);
-                if (rb.isKinematic)
-                {
-                    rb.position = worldPos;
-                    rb.rotation = worldRot;
-                }
+                rb.position = worldPos;
+                rb.rotation = worldRot;
             }
         }
     }
