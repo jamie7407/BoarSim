@@ -235,7 +235,8 @@ public class GameNetworkManager : NetworkBehaviour
         if (_loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        robot.GetComponent<SwerveController>()?.overideInputs(tx, ty, rx, disruptable: false);
+        // SetNetworkDrive: robot-centric path, no field-centric rotation, persistent until next call.
+        robot.GetComponent<SwerveController>()?.SetNetworkDrive(tx, ty, rx);
     }
 
     // Server: apply client mechanism button presses to JointControllers.
@@ -367,11 +368,13 @@ public class GameNetworkManager : NetworkBehaviour
             writer.WriteValueSafe((byte)Mathf.Min(buf.Count, 255));
 
             int limit = Mathf.Min(buf.Count, 255);
-            var invRot = Quaternion.Inverse(rq);
             for (int j = 0; j < limit; j++)
             {
-                var p = invRot * (buf[j].position - rp);
-                var q = invRot * buf[j].rotation;
+                // Send world-space positions directly — no local-space conversion.
+                // The embedded root ensures these are always from the same physics tick,
+                // so clients apply them without needing to reconstruct from local space.
+                var p = buf[j].position;
+                var q = buf[j].rotation;
                 writer.WriteValueSafe(p.x); writer.WriteValueSafe(p.y); writer.WriteValueSafe(p.z);
                 writer.WriteValueSafe(q.x); writer.WriteValueSafe(q.y); writer.WriteValueSafe(q.z); writer.WriteValueSafe(q.w);
             }
@@ -427,15 +430,24 @@ public class GameNetworkManager : NetworkBehaviour
 
             for (int j = 0; j < jointCount; j++)
             {
+                // Joint positions are sent in world space — apply directly, no conversion.
                 reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
                 reader.ReadValueSafe(out float qx); reader.ReadValueSafe(out float qy); reader.ReadValueSafe(out float qz); reader.ReadValueSafe(out float qw);
 
                 if (j >= filtered.Length) continue;
                 var rb = filtered[j];
-                if (rb == null || !rb.isKinematic) continue;
+                if (rb == null) continue;
 
-                rb.position = rootPos + rootRot * new Vector3(px, py, pz);
-                rb.rotation = rootRot * new Quaternion(qx, qy, qz, qw);
+                var worldPos = new Vector3(px, py, pz);
+                var worldRot = new Quaternion(qx, qy, qz, qw);
+                // Update physics position and also set transform directly for immediate visual
+                // (rb.position alone defers the visual update until the next FixedUpdate).
+                rb.transform.SetPositionAndRotation(worldPos, worldRot);
+                if (rb.isKinematic)
+                {
+                    rb.position = worldPos;
+                    rb.rotation = worldRot;
+                }
             }
         }
     }
@@ -456,9 +468,9 @@ public class GameNetworkManager : NetworkBehaviour
                 : (PlayMode)_netPlayMode.Value;
             var (first, last) = ClientSlots(mode);
 
-            // Drivetrain every FixedUpdate: overideInputs() on the host only lasts one physics
-            // frame (inputsOveriden is cleared after processing), so we must call it every tick
-            // or the robot coasts to a stop for 2 out of every 3 frames at the old 3-tick rate.
+            // Drivetrain every FixedUpdate: SetNetworkDrive() is consumed once per physics frame
+            // (_useNetworkDrive resets after use), so we must call it every tick or the robot
+            // coasts to a stop for frames where no new input arrives.
             for (int i = first; i <= last; i++)
                 SendDriveInputForSlot(i);
 

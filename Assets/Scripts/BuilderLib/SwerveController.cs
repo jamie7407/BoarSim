@@ -54,6 +54,18 @@ public class SwerveController : MonoBehaviour
 
     private bool inputsOveridable;
 
+    // Network drive — set every FixedUpdate by GameNetworkManager from client input.
+    // Bypasses field-centric rotation and per-frame expiry so the client-controlled
+    // robot drives at full speed in robot-centric coordinates (same as fieldCentric=false).
+    private float _netDriveX, _netDriveY, _netDriveR;
+    private bool _useNetworkDrive;
+
+    public void SetNetworkDrive(float x, float y, float r)
+    {
+        _netDriveX = x; _netDriveY = y; _netDriveR = r;
+        _useNetworkDrive = true;
+    }
+
     private float length;
     private float width;
     private float radius;
@@ -140,7 +152,17 @@ public class SwerveController : MonoBehaviour
     void FixedUpdate()
     {
         //update controls
-        if (_translateAction.ReadValue<Vector2>().magnitude > 0.05f && inputsOveridable && !steerOveriden)
+        // Capture and clear before the input block so both branches see the same flag.
+        bool usingNetworkDrive = _useNetworkDrive;
+        _useNetworkDrive = false;
+
+        if (usingNetworkDrive)
+        {
+            // Host-forwarded client input: robot-centric, no field rotation, no per-frame expiry.
+            _translateValue = new Vector2(_netDriveX, _netDriveY);
+            _rotateValue    = new Vector2(_netDriveR, 0f);
+        }
+        else if (_translateAction.ReadValue<Vector2>().magnitude > 0.05f && inputsOveridable && !steerOveriden)
         {
             _translateValue = _translateAction.ReadValue<Vector2>();
             _rotateValue = _rotateAction.ReadValue<Vector2>();
@@ -177,8 +199,13 @@ public class SwerveController : MonoBehaviour
 
         float fwd, str;
 
-
-        if (fieldCentric || inputsOveriden)
+        if (usingNetworkDrive)
+        {
+            // Robot-centric: raw stick values map directly to forward/strafe, no heading rotation.
+            fwd = driveInput.x * velocityMp;
+            str = driveInput.z * velocityMp;
+        }
+        else if (fieldCentric || inputsOveriden)
         {
 
             if (!reversed || inputsOveriden)

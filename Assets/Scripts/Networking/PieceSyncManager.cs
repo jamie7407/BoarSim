@@ -62,7 +62,6 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,    OnRegistrationReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELTA,  OnDeltaReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
-            StartCoroutine(MakeClientPiecesKinematic());
         }
     }
 
@@ -237,21 +236,6 @@ public class PieceSyncManager : NetworkBehaviour
         NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
     }
 
-    // ── Client: make pieces kinematic ─────────────────────────────────────────
-
-    private IEnumerator MakeClientPiecesKinematic()
-    {
-        while (IsClient)
-        {
-            yield return new WaitForSeconds(2f);
-            _clientPieces = FindObjectsOfType<GamePiece>();
-            foreach (var p in _clientPieces)
-            {
-                if (p.rb != null) p.rb.isKinematic = true;
-            }
-        }
-    }
-
     // ── Client: receive registration ──────────────────────────────────────────
 
     private void OnRegistrationReceived(ulong senderId, FastBufferReader reader)
@@ -296,6 +280,12 @@ public class PieceSyncManager : NetworkBehaviour
             {
                 _clientMap[id] = best;
                 claimed.Add(best);
+                // Make kinematic immediately so delta positions aren't fought by local physics.
+                if (best.rb != null)
+                {
+                    best.rb.isKinematic = true;
+                    best.rb.interpolation = RigidbodyInterpolation.None;
+                }
             }
         }
 
@@ -328,8 +318,13 @@ public class PieceSyncManager : NetworkBehaviour
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
                 continue;
 
-            piece.rb.position        = new Vector3(px, py, pz);
-            piece.rb.rotation        = new Quaternion(rx, ry, rz, rw);
+            var pos = new Vector3(px, py, pz);
+            var rot = new Quaternion(rx, ry, rz, rw);
+            // Update transform immediately for visual correctness this frame;
+            // rb.position keeps the physics engine in sync for kinematic bodies.
+            piece.transform.SetPositionAndRotation(pos, rot);
+            piece.rb.position        = pos;
+            piece.rb.rotation        = rot;
             piece.rb.velocity        = vel;
             piece.rb.angularVelocity = angVel;
         }

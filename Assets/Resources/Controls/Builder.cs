@@ -514,7 +514,7 @@ public partial class @Builder: IInputActionCollection2, IDisposable
                     ""path"": ""2DVector"",
                     ""interactions"": """",
                     ""processors"": """",
-                    ""groups"": """",
+                    ""groups"": ""Keyboard"",
                     ""action"": ""LeftStick"",
                     ""isComposite"": true,
                     ""isPartOfComposite"": false
@@ -580,7 +580,7 @@ public partial class @Builder: IInputActionCollection2, IDisposable
                     ""path"": ""2DVector"",
                     ""interactions"": """",
                     ""processors"": """",
-                    ""groups"": """",
+                    ""groups"": ""Keyboard"",
                     ""action"": ""RightStick"",
                     ""isComposite"": true,
                     ""isPartOfComposite"": false
