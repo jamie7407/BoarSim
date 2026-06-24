@@ -193,12 +193,12 @@ namespace Util
         public static GameObject FindParentPlayerInput(GameObject child)
         {
             var t = child.transform;
-            while (t.GetComponent<PlayerInput>() == null)
+            while (t != null)
             {
-                t = t.parent.transform;
+                if (t.GetComponent<PlayerInput>() != null) return t.gameObject;
+                t = t.parent;
             }
-            
-            return t.gameObject;
+            return null;
         }
         
         /// <summary>

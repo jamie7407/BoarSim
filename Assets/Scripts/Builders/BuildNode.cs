@@ -75,9 +75,16 @@ public class BuildNode : MonoBehaviour
         if (Actions[0].InputRequired)
         {
             _robotParent = Utils.FindParentPlayerInput(gameObject);
-            _playerInput = _robotParent.GetComponent<PlayerInput>();
-            _inputMap = _playerInput.actions.FindActionMap("Robot");
-            _inputMap.Enable();
+            // Guard: opponent robots on the client machine have no local PlayerInput.
+            // Without this check FindParentPlayerInput previously returned null and
+            // the next line threw, aborting Start() before SpawnPiece ran — leaving
+            // the client with no preloaded ball for that robot.
+            if (_robotParent != null)
+            {
+                _playerInput = _robotParent.GetComponent<PlayerInput>();
+                _inputMap = _playerInput.actions.FindActionMap("Robot");
+                _inputMap.Enable();
+            }
         }
 
         Pieces ??= Resources.LoadAll<GameObject>("Pieces");

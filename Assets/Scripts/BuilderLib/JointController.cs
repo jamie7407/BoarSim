@@ -91,10 +91,16 @@ public class JointController : MonoBehaviour
         _activeSequenceName = null;
         _sequenceInterrupted = false;
         _playerInput = Utils.FindParentObjectComponent<PlayerInput>(gameObject);
-        
-        _inputMap = _playerInput.actions.FindActionMap("Robot");
-        
-        _inputMap.Enable();
+
+        // Opponent robots on the client machine have no local PlayerInput.
+        // Guard so Start() completes and _pidController is initialised even when
+        // _playerInput is null — Update() already has its own null guard.
+        if (_playerInput != null)
+        {
+            _inputMap = _playerInput.actions.FindActionMap("Robot");
+            _inputMap.Enable();
+        }
+
         OverideActive = false;
 
         _pidController = new PIDController
