@@ -55,6 +55,8 @@ public class PieceSyncManager : NetworkBehaviour
     private GamePiece[] _clientPieces = System.Array.Empty<GamePiece>();
     // IDs of balls currently parented to a robot node on client — skip delta sync for these.
     private readonly HashSet<ushort> _clientAttached = new();
+    // MSG_ATTACH messages buffered when robots weren't loaded yet; retried each Update.
+    private readonly List<(ushort id, byte slot, byte nodeIdx, Vector3 lp)> _pendingAttaches = new();
     private LoadMatch _loadMatch;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -423,6 +425,19 @@ public class PieceSyncManager : NetworkBehaviour
             MSG_DETACH, writer, NetworkDelivery.Reliable);
     }
 
+    // ── Client: retry buffered attaches each frame ────────────────────────────
+
+    private void Update()
+    {
+        if (!IsClient || IsServer || _pendingAttaches.Count == 0) return;
+        for (int i = _pendingAttaches.Count - 1; i >= 0; i--)
+        {
+            var (id, slot, nodeIdx, lp) = _pendingAttaches[i];
+            if (ApplyPieceAttach(id, slot, nodeIdx, lp))
+                _pendingAttaches.RemoveAt(i);
+        }
+    }
+
     // ── Client: ball attachment / detachment ──────────────────────────────────
 
     private void OnPieceAttachReceived(ulong senderId, FastBufferReader reader)
@@ -432,17 +447,45 @@ public class PieceSyncManager : NetworkBehaviour
         reader.ReadValueSafe(out byte nodeIdx);
         reader.ReadValueSafe(out float lx); reader.ReadValueSafe(out float ly); reader.ReadValueSafe(out float lz);
 
-        if (!_clientMap.TryGetValue(id, out var piece) || piece == null) return;
+        if (!ApplyPieceAttach(id, slot, nodeIdx, new Vector3(lx, ly, lz)))
+            _pendingAttaches.Add((id, slot, nodeIdx, new Vector3(lx, ly, lz)));
+    }
+
+    // Returns true when the attach was definitively handled (success or skippable failure).
+    // Returns false when robots aren't loaded yet — caller should buffer and retry.
+    private bool ApplyPieceAttach(ushort id, byte slot, byte nodeIdx, Vector3 localPos)
+    {
         if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
-        if (_loadMatch == null) return;
+        if (_loadMatch == null) return false;
 
         var robot = _loadMatch.GetRobotLoaded(slot);
-        if (robot == null) return;
+        if (robot == null) return false; // robots not loaded yet — buffer and retry
 
         var nodes = robot.GetComponentsInChildren<BuildNode>();
-        if (nodeIdx >= nodes.Length) return;
+        if (nodeIdx >= nodes.Length) return true; // bad index, nothing to do
 
         var node = nodes[nodeIdx];
+
+        // Find the ball in _clientMap. If missing (preloaded ball that failed proximity
+        // registration because the robot moved > 2 m before the T=2s window), fall back
+        // to any unregistered GamePiece already parented inside the target node — that IS
+        // the preloaded ball on the client's copy of the robot.
+        if (!_clientMap.TryGetValue(id, out var piece) || piece == null)
+        {
+            var candidate = node.GetComponentInChildren<GamePiece>();
+            if (candidate != null && !_clientMap.ContainsValue(candidate))
+            {
+                _clientMap[id] = candidate;
+                piece = candidate;
+                // Make kinematic so delta doesn't fight the parent-child transform.
+                if (piece.rb != null && !piece.rb.isKinematic)
+                {
+                    piece.rb.isKinematic = true;
+                    piece.rb.interpolation = RigidbodyInterpolation.None;
+                }
+            }
+            else return true; // no local ball to attach — nothing to do
+        }
 
         // Mirror host: disable colliders so the ball doesn't clip through joints.
         if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
@@ -450,7 +493,7 @@ public class PieceSyncManager : NetworkBehaviour
         // Parent to the node — ball now tracks the hopper at 60 fps via the
         // already-synced joint hierarchy instead of 20 Hz position snapshots.
         piece.transform.SetParent(node.transform, false);
-        piece.transform.localPosition = new Vector3(lx, ly, lz);
+        piece.transform.localPosition = localPos;
         piece.transform.localRotation = Quaternion.identity;
 
         if (piece.rb != null && piece.rb.isKinematic)
@@ -460,11 +503,16 @@ public class PieceSyncManager : NetworkBehaviour
         }
 
         _clientAttached.Add(id);
+        return true;
     }
 
     private void OnPieceDetachReceived(ulong senderId, FastBufferReader reader)
     {
         reader.ReadValueSafe(out ushort id);
+
+        // Cancel any buffered attach — the ball was released before robots finished loading.
+        for (int i = _pendingAttaches.Count - 1; i >= 0; i--)
+            if (_pendingAttaches[i].id == id) _pendingAttaches.RemoveAt(i);
 
         if (!_clientMap.TryGetValue(id, out var piece) || piece == null) return;
         if (!_clientAttached.Contains(id)) return;
