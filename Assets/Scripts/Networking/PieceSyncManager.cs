@@ -178,10 +178,25 @@ public class PieceSyncManager : NetworkBehaviour
 
     private void FixedUpdate()
     {
-        if (!IsServer) return;
-        if (++_fixedTick < syncEveryNFixed) return;
-        _fixedTick = 0;
-        SendDelta();
+        if (IsServer)
+        {
+            if (++_fixedTick < syncEveryNFixed) return;
+            _fixedTick = 0;
+            SendDelta();
+            return;
+        }
+
+        if (!IsClient) return;
+        // Keep rb.position in sync with transform.position for kinematic attached balls.
+        // When the robot drives, the child transform moves but the physics engine's rb.position
+        // would otherwise lag — stale physics position breaks collisions and the detach-to-dynamic
+        // transition starts from a wrong physics origin.
+        foreach (var id in _clientAttached)
+        {
+            if (!_clientMap.TryGetValue(id, out var ap) || ap == null || ap.rb == null) continue;
+            ap.rb.position = ap.transform.position;
+            ap.rb.rotation = ap.transform.rotation;
+        }
     }
 
     private void SendDelta()
@@ -226,7 +241,7 @@ public class PieceSyncManager : NetworkBehaviour
             bool wasStationary = _lastPieceState.TryGetValue(id, out var prevState) &&
                                  prevState == GamePieceState.Stationary;
             if (isStationary && !wasStationary) SendPieceAttach(id, piece);
-            else if (!isStationary && wasStationary) SendPieceDetach(id);
+            else if (!isStationary && wasStationary) SendPieceDetach(id, piece);
             _lastPieceState[id] = piece.state;
 
             // Stationary pieces (held by robot) are no longer skipped — they need to be
@@ -360,12 +375,26 @@ public class PieceSyncManager : NetworkBehaviour
 
             var pos = new Vector3(px, py, pz);
             var rot = new Quaternion(rx, ry, rz, rw);
-            // Update transform immediately for visual correctness this frame;
-            // rb.position keeps the physics engine in sync for kinematic bodies.
-            piece.transform.SetPositionAndRotation(pos, rot);
-            piece.rb.position        = pos;
-            piece.rb.rotation        = rot;
-            piece.rb.velocity        = vel;
+
+            if (piece.rb.isKinematic)
+            {
+                // Kinematic field ball: update both transform and physics position.
+                // transform.SetPositionAndRotation is needed for immediate visual correctness
+                // because kinematic rb.position only takes effect at the next physics step.
+                piece.transform.SetPositionAndRotation(pos, rot);
+                piece.rb.position = pos;
+                piece.rb.rotation = rot;
+            }
+            else
+            {
+                // Dynamic shot ball: snap physics to the authoritative server position.
+                // Do NOT touch transform directly — for dynamic RBs, the physics engine
+                // owns the transform and direct assignment breaks physics integration.
+                piece.rb.position = pos;
+                piece.rb.rotation = rot;
+            }
+
+            piece.rb.velocity        = vel;      // no-op for kinematic; applied for dynamic
             piece.rb.angularVelocity = angVel;
         }
     }
@@ -417,10 +446,15 @@ public class PieceSyncManager : NetworkBehaviour
             MSG_ATTACH, writer, NetworkDelivery.Reliable);
     }
 
-    private void SendPieceDetach(ushort id)
+    private void SendPieceDetach(ushort id, GamePiece piece)
     {
-        using var writer = new FastBufferWriter(2, Allocator.Temp);
+        // Include the launch velocity so clients can immediately make the ball dynamic
+        // with the correct velocity — without this the client would have to wait for the
+        // first MSG_DELTA (up to 60 ms later) and the ball would appear to hover.
+        var vel = piece.rb != null ? piece.rb.velocity : Vector3.zero;
+        using var writer = new FastBufferWriter(2 + 12, Allocator.Temp);
         writer.WriteValueSafe(id);
+        writer.WriteValueSafe(vel.x); writer.WriteValueSafe(vel.y); writer.WriteValueSafe(vel.z);
         NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
             MSG_DETACH, writer, NetworkDelivery.Reliable);
     }
@@ -490,6 +524,14 @@ public class PieceSyncManager : NetworkBehaviour
         // Mirror host: disable colliders so the ball doesn't clip through joints.
         if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
 
+        // Ensure the ball is kinematic before parenting — it may have been made dynamic
+        // by a previous OnPieceDetachReceived (shot then re-intaked).
+        if (piece.rb != null && !piece.rb.isKinematic)
+        {
+            piece.rb.isKinematic   = true;
+            piece.rb.interpolation = RigidbodyInterpolation.None;
+        }
+
         // Parent to the node — ball now tracks the hopper at 60 fps via the
         // already-synced joint hierarchy instead of 20 Hz position snapshots.
         piece.transform.SetParent(node.transform, false);
@@ -509,6 +551,8 @@ public class PieceSyncManager : NetworkBehaviour
     private void OnPieceDetachReceived(ulong senderId, FastBufferReader reader)
     {
         reader.ReadValueSafe(out ushort id);
+        reader.ReadValueSafe(out float vx); reader.ReadValueSafe(out float vy); reader.ReadValueSafe(out float vz);
+        var shotVelocity = new Vector3(vx, vy, vz);
 
         // Cancel any buffered attach — the ball was released before robots finished loading.
         for (int i = _pendingAttaches.Count - 1; i >= 0; i--)
@@ -524,6 +568,17 @@ public class PieceSyncManager : NetworkBehaviour
 
         var parent = piece.originalParent != null ? piece.originalParent : null;
         piece.transform.SetParent(parent, true);
+
+        // Make the ball dynamic so it extrapolates between 20 Hz delta ticks.
+        // A kinematic rb ignores rb.velocity — the shot ball would be effectively invisible
+        // (strobing once per 50 ms tick) without this. Interpolation smooths the visual
+        // between physics frames after the velocity is applied.
+        if (piece.rb != null)
+        {
+            piece.rb.isKinematic  = false;
+            piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
+            piece.rb.velocity      = shotVelocity;
+        }
     }
 
     // ── Client: receive piece deletions (scored/removed on server) ────────────
