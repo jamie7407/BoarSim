@@ -158,7 +158,9 @@ public class SwerveController : MonoBehaviour
         {
             // Host-forwarded client input: robot-centric, no field rotation, no per-frame expiry.
             _translateValue = new Vector2(_netDriveX, _netDriveY);
-            _rotateValue    = new Vector2(_netDriveR, 0f);
+            // Respect any steer override (e.g. AutoAim) set earlier this frame.
+            if (!steerOveriden)
+                _rotateValue = new Vector2(_netDriveR, 0f);
         }
         else if (_translateAction.ReadValue<Vector2>().magnitude > 0.05f && inputsOveridable && !steerOveriden)
         {
