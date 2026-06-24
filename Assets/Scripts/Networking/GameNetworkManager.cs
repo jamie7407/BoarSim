@@ -359,14 +359,14 @@ public class GameNetworkManager : NetworkBehaviour
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
+        // Always update the visual transform immediately so joint sync (which also sets the
+        // root from the embedded position) doesn't see a stale root transform, which would
+        // make joints appear disconnected from the robot body between FixedUpdate ticks.
+        robot.transform.SetPositionAndRotation(pos, rot);
         if (rb != null && rb.isKinematic)
         {
             rb.position = pos;
             rb.rotation = rot;
-        }
-        else
-        {
-            robot.transform.SetPositionAndRotation(pos, rot);
         }
     }
 
@@ -456,7 +456,12 @@ public class GameNetworkManager : NetworkBehaviour
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // Apply root from this packet so joints use the same world position.
+            // Apply root from this packet. Setting both the transform (immediate visual) and
+            // rb.position (physics target) is critical: without the transform update, the
+            // root body stays at its old visual position until FixedUpdate fires, making
+            // joint arms visually disconnect from the body between sync ticks.
+            if (robot != null)
+                robot.transform.SetPositionAndRotation(rootPos, rootRot);
             if (rootRb != null)
             {
                 rootRb.position = rootPos;

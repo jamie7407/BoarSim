@@ -22,15 +22,20 @@ public class GamePiece : MonoBehaviour
         hasId = false;
         if (!rb) rb = GetComponent<Rigidbody>();
 
-        // On network clients all piece physics is driven by PieceSyncManager.
-        // Making kinematic here prevents preloaded balls from falling under gravity before
-        // the 2-second registration window, which would push them outside PieceSyncManager's
-        // 2 m match radius and permanently desync them.
+        // Preloaded balls (spawned inside a BuildNode) must be kinematic immediately on
+        // clients so they don't fall out of the hopper before PieceSyncManager's 2-second
+        // registration window. Field balls must NOT be made kinematic here — they need to
+        // settle under physics so their positions match the host's and registration can pair
+        // them by proximity. Field balls are made kinematic by OnRegistrationReceived.
         var gnm = GameNetworkManager.Instance;
         if (rb != null && gnm != null && gnm.IsClient && !gnm.IsHost)
         {
-            rb.isKinematic = true;
-            rb.interpolation = RigidbodyInterpolation.None;
+            bool isPreloaded = GetComponentInParent<BuildNode>() != null;
+            if (isPreloaded)
+            {
+                rb.isKinematic = true;
+                rb.interpolation = RigidbodyInterpolation.None;
+            }
         }
     }
 
