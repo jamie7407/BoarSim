@@ -34,6 +34,10 @@ public class PieceSyncManager : NetworkBehaviour
     private const string MSG_REG    = "BoarSim.PieceReg";
     private const string MSG_DELTA  = "BoarSim.PieceDelta";
     private const string MSG_DELETE = "BoarSim.PieceDelete";
+    // Reliable attach/detach: tells clients to parent a ball to a robot node so it
+    // tracks the hopper at 60 fps instead of drifting at 20 Hz position snapshots.
+    private const string MSG_ATTACH = "BoarSim.PieceAttach";
+    private const string MSG_DETACH = "BoarSim.PieceDetach";
 
     // Server-side state
     private readonly Dictionary<GamePiece, ushort> _serverIds = new();
@@ -42,16 +46,23 @@ public class PieceSyncManager : NetworkBehaviour
     private readonly Dictionary<ushort, Vector3>    _lastSentPos = new();
     private readonly Dictionary<ushort, Quaternion> _lastSentRot = new();
     private readonly HashSet<ushort> _pendingDeleteIds = new();
+    // Tracks last-known piece state per ID to detect hold/release transitions.
+    private readonly Dictionary<ushort, GamePieceState> _lastPieceState = new();
     private int _fixedTick;
 
     // Client-side state
     private readonly Dictionary<ushort, GamePiece> _clientMap = new();
     private GamePiece[] _clientPieces = System.Array.Empty<GamePiece>();
+    // IDs of balls currently parented to a robot node on client — skip delta sync for these.
+    private readonly HashSet<ushort> _clientAttached = new();
+    private LoadMatch _loadMatch;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public override void OnNetworkSpawn()
     {
+        _loadMatch = FindFirstObjectByType<LoadMatch>();
+
         if (IsServer)
         {
             StartCoroutine(RegistrationLoop());
@@ -62,6 +73,8 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,    OnRegistrationReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELTA,  OnDeltaReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_ATTACH, OnPieceAttachReceived);
+            NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DETACH, OnPieceDetachReceived);
         }
     }
 
@@ -72,6 +85,8 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_REG);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELTA);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELETE);
+            NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_ATTACH);
+            NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DETACH);
         }
     }
 
@@ -196,6 +211,16 @@ public class PieceSyncManager : NetworkBehaviour
             if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
 
             bool isStationary = piece.state == GamePieceState.Stationary;
+
+            // Detect hold/release transitions and notify clients so they can parent or
+            // un-parent the ball, giving smooth 60 fps tracking instead of 20 Hz snaps.
+            if (_lastPieceState.TryGetValue(id, out var prevState))
+            {
+                bool wasStationary = prevState == GamePieceState.Stationary;
+                if (isStationary && !wasStationary) SendPieceAttach(id, piece);
+                else if (!isStationary && wasStationary) SendPieceDetach(id);
+            }
+            _lastPieceState[id] = piece.state;
 
             // Stationary pieces (held by robot) are no longer skipped — they need to be
             // synced so the other screen sees the pickup. They are sent as "sleeping"
@@ -322,6 +347,10 @@ public class PieceSyncManager : NetworkBehaviour
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
                 continue;
 
+            // Ball is parented to a robot node — its transform tracks the joint already.
+            // Applying the 20 Hz delta would fight against the smooth parent-child update.
+            if (_clientAttached.Contains(id)) continue;
+
             var pos = new Vector3(px, py, pz);
             var rot = new Quaternion(rx, ry, rz, rw);
             // Update transform immediately for visual correctness this frame;
@@ -334,6 +363,106 @@ public class PieceSyncManager : NetworkBehaviour
         }
     }
 
+    // ── Server: send ball attach/detach to clients ────────────────────────────
+
+    private void SendPieceAttach(ushort id, GamePiece piece)
+    {
+        if (piece.owner == null) return;
+        if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
+        if (_loadMatch == null) return;
+
+        // Walk up to find the owning BuildNode and which robot slot it belongs to.
+        var ownNode = piece.owner.GetComponent<BuildNode>()
+                   ?? piece.owner.GetComponentInParent<BuildNode>();
+        if (ownNode == null) return;
+
+        var swerve = ownNode.GetComponentInParent<SwerveController>();
+        if (swerve == null) return;
+
+        int slot = -1;
+        for (int s = 0; s < 4; s++)
+            if (_loadMatch.GetRobotLoaded(s) == swerve.gameObject) { slot = s; break; }
+        if (slot < 0) return;
+
+        var nodes = swerve.GetComponentsInChildren<BuildNode>();
+        int nodeIdx = System.Array.IndexOf(nodes, ownNode);
+        if (nodeIdx < 0 || nodeIdx > 255) return;
+
+        // Local position of ball in node space (usually near zero after teleportTo).
+        var lp = ownNode.transform.InverseTransformPoint(piece.transform.position);
+
+        using var writer = new FastBufferWriter(2 + 1 + 1 + 12, Allocator.Temp);
+        writer.WriteValueSafe(id);
+        writer.WriteValueSafe((byte)slot);
+        writer.WriteValueSafe((byte)nodeIdx);
+        writer.WriteValueSafe(lp.x); writer.WriteValueSafe(lp.y); writer.WriteValueSafe(lp.z);
+        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
+            MSG_ATTACH, writer, NetworkDelivery.Reliable);
+    }
+
+    private void SendPieceDetach(ushort id)
+    {
+        using var writer = new FastBufferWriter(2, Allocator.Temp);
+        writer.WriteValueSafe(id);
+        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
+            MSG_DETACH, writer, NetworkDelivery.Reliable);
+    }
+
+    // ── Client: ball attachment / detachment ──────────────────────────────────
+
+    private void OnPieceAttachReceived(ulong senderId, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out ushort id);
+        reader.ReadValueSafe(out byte slot);
+        reader.ReadValueSafe(out byte nodeIdx);
+        reader.ReadValueSafe(out float lx); reader.ReadValueSafe(out float ly); reader.ReadValueSafe(out float lz);
+
+        if (!_clientMap.TryGetValue(id, out var piece) || piece == null) return;
+        if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
+        if (_loadMatch == null) return;
+
+        var robot = _loadMatch.GetRobotLoaded(slot);
+        if (robot == null) return;
+
+        var nodes = robot.GetComponentsInChildren<BuildNode>();
+        if (nodeIdx >= nodes.Length) return;
+
+        var node = nodes[nodeIdx];
+
+        // Mirror host: disable colliders so the ball doesn't clip through joints.
+        if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
+
+        // Parent to the node — ball now tracks the hopper at 60 fps via the
+        // already-synced joint hierarchy instead of 20 Hz position snapshots.
+        piece.transform.SetParent(node.transform, false);
+        piece.transform.localPosition = new Vector3(lx, ly, lz);
+        piece.transform.localRotation = Quaternion.identity;
+
+        if (piece.rb != null && piece.rb.isKinematic)
+        {
+            piece.rb.position = piece.transform.position;
+            piece.rb.rotation = piece.transform.rotation;
+        }
+
+        _clientAttached.Add(id);
+    }
+
+    private void OnPieceDetachReceived(ulong senderId, FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out ushort id);
+
+        if (!_clientMap.TryGetValue(id, out var piece) || piece == null) return;
+        if (!_clientAttached.Contains(id)) return;
+
+        _clientAttached.Remove(id);
+
+        // Re-enable colliders and restore to field parent so delta sync can drive it again.
+        if (piece.colliderParent != null) piece.colliderParent.SetActive(true);
+
+        var parent = piece.originalParent != null ? piece.originalParent : null;
+        piece.transform.SetParent(parent, true);
+    }
+
     // ── Client: receive piece deletions (scored/removed on server) ────────────
 
     private void OnDeleteReceived(ulong senderId, FastBufferReader reader)
@@ -342,6 +471,7 @@ public class PieceSyncManager : NetworkBehaviour
         for (int i = 0; i < count; i++)
         {
             reader.ReadValueSafe(out ushort id);
+            _clientAttached.Remove(id);
             if (_clientMap.TryGetValue(id, out var piece))
             {
                 _clientMap.Remove(id);
