@@ -21,6 +21,17 @@ public class GamePiece : MonoBehaviour
     {
         hasId = false;
         if (!rb) rb = GetComponent<Rigidbody>();
+
+        // On network clients all piece physics is driven by PieceSyncManager.
+        // Making kinematic here prevents preloaded balls from falling under gravity before
+        // the 2-second registration window, which would push them outside PieceSyncManager's
+        // 2 m match radius and permanently desync them.
+        var gnm = GameNetworkManager.Instance;
+        if (rb != null && gnm != null && gnm.IsClient && !gnm.IsHost)
+        {
+            rb.isKinematic = true;
+            rb.interpolation = RigidbodyInterpolation.None;
+        }
     }
 
     private void Update()

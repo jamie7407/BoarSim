@@ -52,6 +52,10 @@ public class GameNetworkManager : NetworkBehaviour
     private LoadMatch _loadMatch;
     private int _robotSyncTick;
 
+    // Per-slot filtered joint RB arrays built once in MakeChildRigidbodiesKinematic.
+    // Avoids GetComponentsInChildren + List allocation on every incoming joint-sync packet.
+    private readonly Rigidbody[][] _jointRbCache = new Rigidbody[4][];
+
     // Tracks the LoadMatch.SetupVersion for which we last applied role config.
     // Using version instead of a bool means a new ResetField() always triggers
     // re-application even when the setup coroutine completes in the same frame.
@@ -207,23 +211,28 @@ public class GameNetworkManager : NetworkBehaviour
         }
     }
 
-    // Sets every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
-    // Called on the client after role config is applied.  The root Rigidbody is already
-    // handled by RebindForNetworkPlay; we only need the joint children here.
+    // Sets every non-root, non-GamePiece Rigidbody on every loaded robot kinematic and
+    // caches the filtered list so OnJointSyncReceived doesn't rebuild it every packet.
+    // GamePiece RBs are excluded here because they're handled by PieceSyncManager and
+    // made kinematic in GamePiece.Start() on the client.
     private void MakeChildRigidbodiesKinematic()
     {
         for (int slot = 0; slot < 4; slot++)
         {
+            _jointRbCache[slot] = null;
             var robot = _loadMatch.GetRobotLoaded(slot);
             if (robot == null) continue;
             var rootRb = robot.GetComponent<Rigidbody>();
+            var buf = new System.Collections.Generic.List<Rigidbody>();
             foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
             {
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
                 rb.interpolation = RigidbodyInterpolation.None;
+                buf.Add(rb);
             }
+            _jointRbCache[slot] = buf.ToArray();
         }
     }
 
@@ -455,20 +464,10 @@ public class GameNetworkManager : NetworkBehaviour
                 rootRb.rotation = rootRot;
             }
 
-            // Pre-build the filtered list in the same order as SendJointSync (O(n) total).
-            Rigidbody[] filtered = System.Array.Empty<Rigidbody>();
-            if (robot != null)
-            {
-                var allRbs = robot.GetComponentsInChildren<Rigidbody>();
-                var buf = new System.Collections.Generic.List<Rigidbody>(allRbs.Length);
-                foreach (var rb in allRbs)
-                {
-                    if (rb == rootRb) continue;
-                    if (rb.GetComponent<GamePiece>() != null) continue;
-                    buf.Add(rb);
-                }
-                filtered = buf.ToArray();
-            }
+            // Use the cached filtered list built in MakeChildRigidbodiesKinematic.
+            // Avoids GetComponentsInChildren + List allocation at 20 Hz.
+            Rigidbody[] filtered = (slot < _jointRbCache.Length ? _jointRbCache[slot] : null)
+                                   ?? System.Array.Empty<Rigidbody>();
 
             for (int j = 0; j < jointCount; j++)
             {

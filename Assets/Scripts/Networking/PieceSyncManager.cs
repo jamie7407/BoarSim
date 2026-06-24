@@ -210,7 +210,11 @@ public class PieceSyncManager : NetworkBehaviour
                 (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
-            if (posUnchanged && (sleeping || isStationary)) continue;
+            // Stationary (held) pieces are always re-sent even when position is unchanged:
+            // MSG_DELTA is unreliable, so the single "ball entered hopper" packet may be
+            // dropped, and the client would never get corrected if we skip on posUnchanged.
+            // Sleeping world pieces (not held) are still skipped — they don't move.
+            if (posUnchanged && sleeping) continue;
 
             var pos = piece.rb.position;
             var rot = piece.rb.rotation;
