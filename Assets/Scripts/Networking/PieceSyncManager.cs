@@ -153,17 +153,33 @@ public class PieceSyncManager : NetworkBehaviour
 
     private void SendRegistration()
     {
-        // Per entry: ushort id (2) + byte type (1) + 3 floats pos (12) = 15 bytes
-        int bufSize = 2 + _serverPieces.Length * 15;
-        using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
-
-        writer.WriteValueSafe((ushort)_serverPieces.Length);
-
+        // Build the registration list, deliberately excluding non-preloaded Stationary
+        // pieces (field balls that were intaked before T=2s).  Their server-side rb.position
+        // is INSIDE the robot, but the corresponding client ball is still at its spawn
+        // position on the field — the 2m proximity window cannot bridge that gap, causing a
+        // wrong ball to be claimed and MSG_ATTACH to be forever silently discarded.
+        // Preloaded balls (isPreloaded=true) ARE included: both host and client have them at
+        // the same node position so proximity-match succeeds.  Intaked field balls are synced
+        // separately via MSG_ATTACH, and the ApplyPieceAttach proximity fallback finds the
+        // correct local ball because it is the only unclaimed piece of that type.
+        var toRegister = new System.Collections.Generic.List<(GamePiece piece, ushort id)>();
         foreach (var piece in _serverPieces)
         {
+            if (piece == null) continue;
+            if (!piece.isPreloaded && piece.state == GamePieceState.Stationary) continue;
             if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
-            var pos = piece.rb != null ? piece.rb.position : piece.transform.position;
+            toRegister.Add((piece, id));
+        }
 
+        // Per entry: ushort id (2) + byte type (1) + 3 floats pos (12) = 15 bytes
+        int bufSize = 2 + toRegister.Count * 15;
+        using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
+
+        writer.WriteValueSafe((ushort)toRegister.Count);
+
+        foreach (var (piece, id) in toRegister)
+        {
+            var pos = piece.rb != null ? piece.rb.position : piece.transform.position;
             writer.WriteValueSafe(id);
             writer.WriteValueSafe((byte)piece.pieceType);
             writer.WriteValueSafe(pos.x);

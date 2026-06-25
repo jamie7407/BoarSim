@@ -14,6 +14,11 @@ public class GamePiece : MonoBehaviour
     [HideInInspector] public float startingDistance;
     // Robot slot (0-3) that last fired this piece into the world; -1 = unknown/spawned
     [HideInInspector] public int lastScoredBySlot = -1;
+    // True when this ball was spawned inside a BuildNode (i.e. preloaded into the robot).
+    // Used by PieceSyncManager to decide whether to include this ball in MSG_REG — preloaded
+    // balls are at the same world position on both host and client so they proxy-match
+    // correctly; field balls that were intaked before T=2s have mismatched positions.
+    [HideInInspector] public bool isPreloaded;
 
     private bool hasId;
 
@@ -22,17 +27,15 @@ public class GamePiece : MonoBehaviour
         hasId = false;
         if (!rb) rb = GetComponent<Rigidbody>();
 
-        // On non-host clients, preloaded balls (those spawned inside a BuildNode) must be
-        // kinematic from spawn — they sit at their designed position in the hopper and are
-        // driven by joint-sync, not local physics.
-        // Field balls stay dynamic until OnRegistrationReceived (T≈2s) makes them kinematic;
-        // before registration they aren't in _clientMap so delta is skipped, and gravity
-        // settling keeps them visually on the field.  Making all field balls kinematic at
-        // spawn caused them to float at their scene-placed spawn position indefinitely.
+        // Detect preload state before any parenting changes can occur.
+        isPreloaded = GetComponentInParent<BuildNode>() != null;
+
+        // On non-host clients, preloaded balls must be kinematic from spawn — they sit
+        // at their designed hopper position, driven by joint-sync, not local physics.
+        // Field balls stay dynamic until OnRegistrationReceived (T≈2s) makes them kinematic.
         var gnm = GameNetworkManager.Instance;
         if (rb != null && gnm != null && gnm.IsClient && !gnm.IsHost)
         {
-            bool isPreloaded = GetComponentInParent<BuildNode>() != null;
             if (isPreloaded)
             {
                 rb.isKinematic   = true;
