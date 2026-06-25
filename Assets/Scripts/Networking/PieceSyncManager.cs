@@ -9,19 +9,18 @@ using Util;
 // No per-piece NetworkObject is created — all state is packed into custom named messages.
 //
 // Protocol:
-//   MSG_REG  (Reliable, every 5s)   — maps server piece IDs to world positions+type so
-//                                     clients can build an id→localPiece lookup table.
-//   MSG_DELTA (Unreliable, ~10 Hz)  — per changed piece: id, pos, rot, flags, vel.
-//                                     Sleeping/unchanged pieces are skipped entirely.
+//   MSG_REG    (Reliable, every 5s)   — maps server piece IDs to spawn positions+type.
+//   MSG_DELTA  (Unreliable-Seq, ~20Hz)— per changed piece: id, pos, rot, flags, vel.
+//   MSG_ATTACH (Reliable)             — fallback for balls intaked before T=2s registration.
+//   MSG_DETACH (Reliable)             — ball released/shot with velocity.
 //
-// Piece identification: host assigns sequential IDs at registration time and broadcasts
-// each piece's position+type. Clients find the nearest local piece of the same type
-// within 2 m to claim that ID. Works because both host and client run the same
-// SpawnGamePiece logic and start pieces at the same world positions.
-//
-// Client pieces are set kinematic so they don't fight the received positions.
-// Stationary pieces (held by robots) are excluded from the delta — they
-// follow robot transforms which are synced separately by GameNetworkManager.
+// Primary attach mechanism: when MSG_DELTA arrives with stationary=true for a registered
+// ball, the client immediately parents it to the nearest BuildNode found by proximity to
+// the delta position (which is the exact host-physics position inside the robot).
+// This fires from the unreliable-sequenced channel — faster than MSG_ATTACH (reliable) —
+// eliminating the window where an unparented kinematic ball can appear to pass through
+// robot geometry. MSG_ATTACH handles the fallback case where the ball was not yet
+// registered (intaked before the T=2s registration window).
 
 [RequireComponent(typeof(NetworkObject))]
 public class PieceSyncManager : NetworkBehaviour
@@ -58,6 +57,9 @@ public class PieceSyncManager : NetworkBehaviour
     // MSG_ATTACH messages buffered when robots weren't loaded yet; retried each Update.
     private readonly List<(ushort id, byte slot, byte nodeIdx, Vector3 lp, PieceNames pieceType)> _pendingAttaches = new();
     private LoadMatch _loadMatch;
+    // Cached BuildNode list across all loaded robots; refreshed every 0.5 s.
+    private BuildNode[] _cachedNodes;
+    private float       _nodeCacheTime;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -365,6 +367,40 @@ public class PieceSyncManager : NetworkBehaviour
         Debug.Log($"[Net] Piece registration complete: {_clientMap.Count}/{count} pieces mapped.");
     }
 
+    // ── Client: nearest-node lookup ───────────────────────────────────────────
+
+    // Returns the BuildNode (across all loaded robots) whose world position is closest
+    // to worldPos and within maxDist metres, or null if none is found.
+    // The cache is rebuilt every 0.5 s so robots that load after the first delta are
+    // discovered without scanning GetComponentsInChildren every single tick.
+    private BuildNode FindNearestBuildNode(Vector3 worldPos, float maxDist)
+    {
+        if (_cachedNodes == null || Time.time - _nodeCacheTime > 0.5f)
+        {
+            if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
+            var nodeList = new List<BuildNode>();
+            if (_loadMatch != null)
+                for (int s = 0; s < 4; s++)
+                {
+                    var robot = _loadMatch.GetRobotLoaded(s);
+                    if (robot != null)
+                        nodeList.AddRange(robot.GetComponentsInChildren<BuildNode>());
+                }
+            _cachedNodes    = nodeList.ToArray();
+            _nodeCacheTime  = Time.time;
+        }
+
+        BuildNode nearest    = null;
+        float     bestSqDist = maxDist * maxDist;
+        foreach (var n in _cachedNodes)
+        {
+            if (n == null) continue;
+            float sq = (n.transform.position - worldPos).sqrMagnitude;
+            if (sq < bestSqDist) { bestSqDist = sq; nearest = n; }
+        }
+        return nearest;
+    }
+
     // ── Client: receive and apply delta ──────────────────────────────────────
 
     private void OnDeltaReceived(ulong senderId, FastBufferReader reader)
@@ -396,15 +432,44 @@ public class PieceSyncManager : NetworkBehaviour
             // Applying the 20 Hz delta would fight against the smooth parent-child update.
             if (_clientAttached.Contains(id)) continue;
 
-            // Server is holding this ball. Make it kinematic immediately so gravity cannot
-            // pull it through the robot's kinematic colliders while MSG_ATTACH is in flight.
-            // Without this, a ball snapped to the robot's position via rb.position is still
-            // subject to physics depenetration — it gets pushed downward by robot geometry
-            // and falls through the hopper before MSG_ATTACH arrives to parent it properly.
-            if (stationary && piece.rb != null && !piece.rb.isKinematic)
+            // Server is holding this ball.
+            if (stationary)
             {
-                piece.rb.isKinematic   = true;
-                piece.rb.interpolation = RigidbodyInterpolation.None;
+                // Ensure kinematic immediately — gravity must not pull a dynamic ball
+                // through robot colliders while we attempt the node parent below.
+                if (piece.rb != null && !piece.rb.isKinematic)
+                {
+                    piece.rb.isKinematic   = true;
+                    piece.rb.interpolation = RigidbodyInterpolation.None;
+                }
+
+                // Auto-attach: parent directly to the nearest BuildNode using the exact
+                // host-physics position reported in this delta packet. This fires from the
+                // unreliable-sequenced channel — always faster than MSG_ATTACH (reliable) —
+                // closing the window where an unparented kinematic ball can slide or fall
+                // through robot geometry before MSG_ATTACH arrives.
+                var nearNode = FindNearestBuildNode(new Vector3(px, py, pz), 2f);
+                if (nearNode != null)
+                {
+                    if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
+                    piece.transform.SetParent(nearNode.transform, false);
+                    piece.transform.localPosition = Vector3.zero;
+                    piece.transform.localRotation = Quaternion.identity;
+                    if (piece.rb != null)
+                    {
+                        piece.rb.position = piece.transform.position;
+                        piece.rb.rotation = piece.transform.rotation;
+                    }
+                    piece.owner             = nearNode.transform;
+                    piece.state             = GamePieceState.Stationary;
+                    nearNode.currentGamePiece = piece;
+                    nearNode.currentState     = NodeState.Stowing;
+                    _clientAttached.Add(id);
+                    Debug.Log($"[Net][Client] Ball {id} auto-attached via delta (nearest node)");
+                    continue; // Now tracked by node parenting; skip position update
+                }
+                // No node found yet (robots still loading) — fall through so the ball is
+                // placed kinematically at the host position. Retries on next delta tick.
             }
 
             var pos = new Vector3(px, py, pz);
