@@ -9,18 +9,20 @@ using Util;
 // No per-piece NetworkObject is created — all state is packed into custom named messages.
 //
 // Protocol:
-//   MSG_REG    (Reliable, every 5s)   — maps server piece IDs to spawn positions+type.
+//   MSG_REG    (Reliable, every 5s)   — deterministic ID→ball mapping, no proximity match.
 //   MSG_DELTA  (Unreliable-Seq, ~20Hz)— per changed piece: id, pos, rot, flags, vel.
 //   MSG_ATTACH (Reliable)             — fallback for balls intaked before T=2s registration.
 //   MSG_DETACH (Reliable)             — ball released/shot with velocity.
 //
-// Primary attach mechanism: when MSG_DELTA arrives with stationary=true for a registered
-// ball, the client immediately parents it to the nearest BuildNode found by proximity to
-// the delta position (which is the exact host-physics position inside the robot).
-// This fires from the unreliable-sequenced channel — faster than MSG_ATTACH (reliable) —
-// eliminating the window where an unparented kinematic ball can appear to pass through
-// robot geometry. MSG_ATTACH handles the fallback case where the ball was not yet
-// registered (intaked before the T=2s registration window).
+// ID assignment (deterministic): host sorts ALL GamePieces by their Unity hierarchy path
+// (chain of sibling indices from root). Both machines run the same scene so the sort
+// order is identical — the server's sorted_pieces[i] is the same object as the client's
+// sorted_pieces[i], allowing index-based matching with NO proximity math. Held balls,
+// preloaded balls, and field balls are all registered correctly regardless of position.
+//
+// Primary hold mechanism: when MSG_DELTA arrives with stationary=true for a registered
+// ball, the client immediately parents it to the nearest BuildNode (auto-attach), which
+// fires faster than the reliable MSG_ATTACH. MSG_ATTACH is a redundant fallback.
 
 [RequireComponent(typeof(NetworkObject))]
 public class PieceSyncManager : NetworkBehaviour
@@ -94,6 +96,19 @@ public class PieceSyncManager : NetworkBehaviour
         }
     }
 
+    // ── Deterministic piece ordering ──────────────────────────────────────────
+
+    // Builds a sortable key from the chain of sibling indices up the transform hierarchy.
+    // Two transforms on any two machines running the same scene will produce identical keys
+    // for the same object, because Unity's scene load preserves sibling order.
+    // Zero-padded to 5 digits so lexicographic sort == numeric sort at each level.
+    private static string HierarchyKey(Transform t)
+    {
+        var parts = new List<string>();
+        while (t != null) { parts.Insert(0, t.GetSiblingIndex().ToString("D5")); t = t.parent; }
+        return string.Join("/", parts);
+    }
+
     // ── Server: registration ──────────────────────────────────────────────────
 
     private IEnumerator RegistrationLoop()
@@ -120,6 +135,19 @@ public class PieceSyncManager : NetworkBehaviour
     private void RefreshServerPieces()
     {
         _serverPieces = FindObjectsOfType<GamePiece>();
+
+        // Sort by deterministic hierarchy key before assigning IDs so that the client,
+        // which sorts its own pieces by the same key, gets the same ordering and can
+        // match server_entries[i] → client_sorted[i] without any proximity math.
+        System.Array.Sort(_serverPieces, (a, b) =>
+        {
+            if (a == null && b == null) return  0;
+            if (a == null)             return  1;
+            if (b == null)             return -1;
+            return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
+                                  System.StringComparison.Ordinal);
+        });
+
         var found = new HashSet<GamePiece>(_serverPieces);
 
         // Detect pieces that were registered but have since been destroyed (e.g. scored).
@@ -155,38 +183,28 @@ public class PieceSyncManager : NetworkBehaviour
 
     private void SendRegistration()
     {
-        // Build the registration list, deliberately excluding non-preloaded Stationary
-        // pieces (field balls that were intaked before T=2s).  Their server-side rb.position
-        // is INSIDE the robot, but the corresponding client ball is still at its spawn
-        // position on the field — the 2m proximity window cannot bridge that gap, causing a
-        // wrong ball to be claimed and MSG_ATTACH to be forever silently discarded.
-        // Preloaded balls (isPreloaded=true) ARE included: both host and client have them at
-        // the same node position so proximity-match succeeds.  Intaked field balls are synced
-        // separately via MSG_ATTACH, and the ApplyPieceAttach proximity fallback finds the
-        // correct local ball because it is the only unclaimed piece of that type.
-        var toRegister = new System.Collections.Generic.List<(GamePiece piece, ushort id)>();
+        // Deterministic registration: _serverPieces is already sorted by HierarchyKey.
+        // Send (id, type) for every piece in that sorted order — no positions needed.
+        // The client sorts its own pieces by the same key and matches by index, so
+        // client_sorted[i].id == server_sorted[i].id without any proximity math.
+        // Held/stationary balls are included: their client counterpart is still at spawn
+        // position but the sort key (hierarchy path) is position-independent.
+        var toSend = new List<(ushort id, byte type)>();
         foreach (var piece in _serverPieces)
         {
             if (piece == null) continue;
-            if (!piece.isPreloaded && piece.state == GamePieceState.Stationary) continue;
             if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
-            toRegister.Add((piece, id));
+            toSend.Add((id, (byte)piece.pieceType));
         }
 
-        // Per entry: ushort id (2) + byte type (1) + 3 floats pos (12) = 15 bytes
-        int bufSize = 2 + toRegister.Count * 15;
+        // Per entry: id (2) + type (1) = 3 bytes; plus 2-byte count prefix.
+        int bufSize = 2 + toSend.Count * 3;
         using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
-
-        writer.WriteValueSafe((ushort)toRegister.Count);
-
-        foreach (var (piece, id) in toRegister)
+        writer.WriteValueSafe((ushort)toSend.Count);
+        foreach (var (id, type) in toSend)
         {
-            var pos = piece.rb != null ? piece.rb.position : piece.transform.position;
             writer.WriteValueSafe(id);
-            writer.WriteValueSafe((byte)piece.pieceType);
-            writer.WriteValueSafe(pos.x);
-            writer.WriteValueSafe(pos.y);
-            writer.WriteValueSafe(pos.z);
+            writer.WriteValueSafe(type);
         }
 
         NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_REG, writer, NetworkDelivery.Reliable);
@@ -316,55 +334,58 @@ public class PieceSyncManager : NetworkBehaviour
     private void OnRegistrationReceived(ulong senderId, FastBufferReader reader)
     {
         reader.ReadValueSafe(out ushort count);
-
-        _clientPieces = FindObjectsOfType<GamePiece>();
-
-        // Track which local pieces have already been claimed this registration pass
-        var claimed = new HashSet<GamePiece>();
-
-        // Collect server entries first so we can do a single-pass proximity match
-        var entries = new (ushort id, PieceNames type, Vector3 pos)[count];
+        var entries = new (ushort id, PieceNames type)[count];
         for (int i = 0; i < count; i++)
         {
             reader.ReadValueSafe(out ushort id);
             reader.ReadValueSafe(out byte typeB);
-            reader.ReadValueSafe(out float px);
-            reader.ReadValueSafe(out float py);
-            reader.ReadValueSafe(out float pz);
-            entries[i] = (id, (PieceNames)typeB, new Vector3(px, py, pz));
+            entries[i] = (id, (PieceNames)typeB);
         }
 
-        // Match each server piece to the nearest unclaimed local piece of the same type
-        foreach (var (id, pieceType, regPos) in entries)
+        // Sort client pieces by the same hierarchy key the server used.
+        // Server sorted its pieces, assigned IDs in that order, and sent them in order.
+        // client_sorted[i] is therefore the same physical ball as server_sorted[i].
+        // No proximity math — position doesn't matter, only scene structure.
+        _clientPieces = FindObjectsOfType<GamePiece>();
+        System.Array.Sort(_clientPieces, (a, b) =>
         {
-            if (_clientMap.ContainsKey(id)) continue; // already mapped from a previous registration
+            if (a == null && b == null) return  0;
+            if (a == null)             return  1;
+            if (b == null)             return -1;
+            return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
+                                  System.StringComparison.Ordinal);
+        });
 
-            GamePiece best     = null;
-            float     bestSqDist = 4f; // 2 m radius
+        int mapped = 0;
+        int limit  = Mathf.Min(count, _clientPieces.Length);
+        for (int i = 0; i < limit; i++)
+        {
+            var (id, type) = entries[i];
+            var piece      = _clientPieces[i];
+            if (piece == null) continue;
+            if (_clientMap.ContainsKey(id)) continue; // re-registration; already mapped
 
-            foreach (var p in _clientPieces)
+            if (piece.pieceType != type)
             {
-                if (p.pieceType != pieceType) continue;
-                if (claimed.Contains(p)) continue;
-
-                float d = (p.transform.position - regPos).sqrMagnitude;
-                if (d < bestSqDist) { bestSqDist = d; best = p; }
+                Debug.LogWarning($"[Net][Client] Registration index {i}: server type={type} " +
+                                 $"client type={piece.pieceType}. Scene hierarchy may differ between machines.");
+                continue;
             }
 
-            if (best != null)
+            _clientMap[id] = piece;
+            if (piece.rb != null)
             {
-                _clientMap[id] = best;
-                claimed.Add(best);
-                // Make kinematic immediately so delta positions aren't fought by local physics.
-                if (best.rb != null)
-                {
-                    best.rb.isKinematic = true;
-                    best.rb.interpolation = RigidbodyInterpolation.None;
-                }
+                piece.rb.isKinematic  = true;
+                piece.rb.interpolation = RigidbodyInterpolation.None;
             }
+            mapped++;
         }
 
-        Debug.Log($"[Net] Piece registration complete: {_clientMap.Count}/{count} pieces mapped.");
+        if (_clientPieces.Length != count)
+            Debug.LogWarning($"[Net][Client] Registration count mismatch: server={count} client={_clientPieces.Length}. " +
+                             "Some balls will not be mapped until next registration cycle.");
+
+        Debug.Log($"[Net][Client] Registration complete: {mapped} new, {_clientMap.Count} total, server={count}, client pieces={_clientPieces.Length}");
     }
 
     // ── Client: nearest-node lookup ───────────────────────────────────────────
