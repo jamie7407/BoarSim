@@ -568,45 +568,51 @@ public class PieceSyncManager : NetworkBehaviour
 
         var node = nodes[nodeIdx];
 
-        // Find the ball in _clientMap. Three fallback tiers:
+        // Find the ball in _clientMap. Two tiers:
         //  1. Normal: ball was registered by proximity at T=2s → found by id.
-        //  2. Preloaded fallback: ball was spawned inside this node but didn't get
-        //     proximity-matched (robot moved > 2m before T=2s window) → look for any
-        //     unregistered GamePiece already parented inside the target node.
-        //  3. Proximity fallback: field ball intaked before T=2s so server registration
-        //     position was inside the robot while client ball was still on the field →
-        //     search all client pieces for the closest unclaimed piece of the right type.
+        //  2. Proximity fallback: field ball intaked before T=2s (server registration
+        //     position was inside the robot; client ball still on the field) →
+        //     search all client pieces for the closest unclaimed piece of the right type,
+        //     excluding balls already parented to this node (those are preloaded balls
+        //     belonging to a different server ID and will receive their own MSG_ATTACH).
+        //
+        // Note: we intentionally do NOT use a "preloaded-in-node" tier-2 fallback.
+        // Tier-2 caused preloaded balls to be matched to field-ball MSG_ATTACH events,
+        // adding them to _clientAttached and freezing them at localPosition=zero.
+        // Preloaded-ball MSG_ATTACH events that arrive before MSG_REG are left pending
+        // (_pendingAttaches) and retried once registration populates _clientMap.
         if (!_clientMap.TryGetValue(id, out var piece) || piece == null)
         {
             GamePiece candidate = null;
 
-            // Tier 2: preloaded ball already in node hierarchy
-            var inNode = node.GetComponentInChildren<GamePiece>();
-            if (inNode != null && !_clientMap.ContainsValue(inNode))
-                candidate = inNode;
+            // Proximity fallback: closest unclaimed ball of the right type near the node,
+            // excluding balls already inside the node hierarchy (those are preloaded).
+            if (_clientPieces == null || _clientPieces.Length == 0)
+                _clientPieces = FindObjectsOfType<GamePiece>();
 
-            // Tier 3: search all client pieces by type for closest unclaimed match
+            var nodePos = node.transform.position;
+            float bestSqDist = float.MaxValue;
+            foreach (var cp in _clientPieces)
+            {
+                if (cp == null || cp.pieceType != pieceType) continue;
+                if (_clientMap.ContainsValue(cp)) continue;
+                // Skip balls that are already children of this node — they're preloaded
+                // pieces with their own server IDs and should not be hijacked here.
+                if (cp.transform.IsChildOf(node.transform)) continue;
+                float d = (cp.transform.position - nodePos).sqrMagnitude;
+                if (d < bestSqDist) { bestSqDist = d; candidate = cp; }
+            }
+            if (candidate != null)
+                Debug.Log($"[Net][Client] MSG_ATTACH id={id}: proximity fallback found {candidate.name} at dist={Mathf.Sqrt(bestSqDist):F1}m");
+
             if (candidate == null)
             {
-                // Refresh piece list if stale (normally populated by OnRegistrationReceived)
-                if (_clientPieces == null || _clientPieces.Length == 0)
-                    _clientPieces = FindObjectsOfType<GamePiece>();
-
-                var nodePos = node.transform.position;
-                float bestSqDist = float.MaxValue;
-                foreach (var cp in _clientPieces)
-                {
-                    if (cp == null || cp.pieceType != pieceType) continue;
-                    if (_clientMap.ContainsValue(cp)) continue;
-                    float d = (cp.transform.position - nodePos).sqrMagnitude;
-                    if (d < bestSqDist) { bestSqDist = d; candidate = cp; }
-                }
-                if (candidate != null)
-                    Debug.Log($"[Net][Client] MSG_ATTACH id={id}: proximity fallback found {candidate.name} at dist={Mathf.Sqrt(bestSqDist):F1}m");
+                // No ball found. If registration hasn't happened yet (_clientMap empty),
+                // return false so the caller buffers this in _pendingAttaches and retries
+                // once MSG_REG arrives and populates the map.  If registration has already
+                // run and we still can't find anything, the ball is genuinely absent.
+                return _clientMap.Count > 0;
             }
-
-            if (candidate == null)
-                return true; // no local ball to attach — nothing to do
 
             _clientMap[id] = candidate;
             piece = candidate;
