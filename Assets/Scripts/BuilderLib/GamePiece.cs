@@ -22,20 +22,19 @@ public class GamePiece : MonoBehaviour
         hasId = false;
         if (!rb) rb = GetComponent<Rigidbody>();
 
-        // Preloaded balls (spawned inside a BuildNode) must be kinematic immediately on
-        // clients so they don't fall out of the hopper before PieceSyncManager's 2-second
-        // registration window. Field balls must NOT be made kinematic here — they need to
-        // settle under physics so their positions match the host's and registration can pair
-        // them by proximity. Field balls are made kinematic by OnRegistrationReceived.
+        // On non-host clients, ALL balls must be kinematic from the moment they spawn.
+        // Host-authoritative physics drives every ball via delta messages; a dynamic client
+        // ball would fall under gravity and be depenetrated downward through the robot's
+        // kinematic colliders — appearing to "fall through the hopper" — in the window
+        // before the first delta or MSG_ATTACH arrives.
+        // Field balls don't need gravity settling on the client because they never use
+        // local physics; they track host positions via MSG_DELTA.
+        // OnPieceDetachReceived explicitly makes balls dynamic for flight after a shot.
         var gnm = GameNetworkManager.Instance;
         if (rb != null && gnm != null && gnm.IsClient && !gnm.IsHost)
         {
-            bool isPreloaded = GetComponentInParent<BuildNode>() != null;
-            if (isPreloaded)
-            {
-                rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
-            }
+            rb.isKinematic   = true;
+            rb.interpolation = RigidbodyInterpolation.None;
         }
     }
 

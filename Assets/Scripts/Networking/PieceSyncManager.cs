@@ -497,6 +497,15 @@ public class PieceSyncManager : NetworkBehaviour
         {
             if (!_clientMap.TryGetValue(id, out var ap) || ap == null) continue;
 
+            // Re-assert kinematic every frame — if anything reset isKinematic between
+            // frames (e.g. a poorly-ordered script or physics callback), gravity would
+            // immediately start pulling the held ball downward through robot geometry.
+            if (ap.rb != null && !ap.rb.isKinematic)
+            {
+                ap.rb.isKinematic   = true;
+                ap.rb.interpolation = RigidbodyInterpolation.None;
+            }
+
             // Keep colliders disabled while held — host disables them every frame.
             if (ap.colliderParent != null && ap.colliderParent.activeSelf)
                 ap.colliderParent.SetActive(false);
