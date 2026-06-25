@@ -56,7 +56,7 @@ public class PieceSyncManager : NetworkBehaviour
     // IDs of balls currently parented to a robot node on client — skip delta sync for these.
     private readonly HashSet<ushort> _clientAttached = new();
     // MSG_ATTACH messages buffered when robots weren't loaded yet; retried each Update.
-    private readonly List<(ushort id, byte slot, byte nodeIdx, Vector3 lp)> _pendingAttaches = new();
+    private readonly List<(ushort id, byte slot, byte nodeIdx, Vector3 lp, PieceNames pieceType)> _pendingAttaches = new();
     private LoadMatch _loadMatch;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -268,7 +268,13 @@ public class PieceSyncManager : NetworkBehaviour
             _lastSentPos[id] = pos;
             _lastSentRot[id] = rot;
 
-            byte flags = sleeping ? (byte)1 : (byte)0;
+            // bit 0 = sleeping, bit 1 = stationary (held by robot on server).
+            // The stationary bit lets the client make the ball kinematic immediately
+            // from the delta, before MSG_ATTACH arrives — preventing gravity from
+            // pulling a dynamic ball through the robot's kinematic colliders.
+            byte flags = 0;
+            if (sleeping)     flags |= 1;
+            if (isStationary) flags |= 2;
             writer.WriteValueSafe(id);
             writer.WriteValueSafe(pos.x); writer.WriteValueSafe(pos.y); writer.WriteValueSafe(pos.z);
             writer.WriteValueSafe(rot.x); writer.WriteValueSafe(rot.y); writer.WriteValueSafe(rot.z); writer.WriteValueSafe(rot.w);
@@ -354,7 +360,8 @@ public class PieceSyncManager : NetworkBehaviour
             reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
             reader.ReadValueSafe(out float rx); reader.ReadValueSafe(out float ry); reader.ReadValueSafe(out float rz); reader.ReadValueSafe(out float rw);
             reader.ReadValueSafe(out byte flags);
-            bool sleeping = (flags & 1) != 0;
+            bool sleeping   = (flags & 1) != 0;
+            bool stationary = (flags & 2) != 0;
 
             var vel    = Vector3.zero;
             var angVel = Vector3.zero;
@@ -373,12 +380,23 @@ public class PieceSyncManager : NetworkBehaviour
             // Applying the 20 Hz delta would fight against the smooth parent-child update.
             if (_clientAttached.Contains(id)) continue;
 
+            // Server is holding this ball. Make it kinematic immediately so gravity cannot
+            // pull it through the robot's kinematic colliders while MSG_ATTACH is in flight.
+            // Without this, a ball snapped to the robot's position via rb.position is still
+            // subject to physics depenetration — it gets pushed downward by robot geometry
+            // and falls through the hopper before MSG_ATTACH arrives to parent it properly.
+            if (stationary && piece.rb != null && !piece.rb.isKinematic)
+            {
+                piece.rb.isKinematic   = true;
+                piece.rb.interpolation = RigidbodyInterpolation.None;
+            }
+
             var pos = new Vector3(px, py, pz);
             var rot = new Quaternion(rx, ry, rz, rw);
 
             if (piece.rb.isKinematic)
             {
-                // Kinematic field ball: update both transform and physics position.
+                // Kinematic ball: update both transform and physics position.
                 // transform.SetPositionAndRotation is needed for immediate visual correctness
                 // because kinematic rb.position only takes effect at the next physics step.
                 piece.transform.SetPositionAndRotation(pos, rot);
@@ -437,10 +455,13 @@ public class PieceSyncManager : NetworkBehaviour
         // Local position of ball in node space (usually near zero after teleportTo).
         var lp = ownNode.transform.InverseTransformPoint(piece.transform.position);
 
-        using var writer = new FastBufferWriter(2 + 1 + 1 + 12, Allocator.Temp);
+        // pieceType is included so the client can do a proximity fallback search when
+        // the ball isn't in _clientMap (e.g. intaked before the T=2s registration window).
+        using var writer = new FastBufferWriter(2 + 1 + 1 + 1 + 12, Allocator.Temp);
         writer.WriteValueSafe(id);
         writer.WriteValueSafe((byte)slot);
         writer.WriteValueSafe((byte)nodeIdx);
+        writer.WriteValueSafe((byte)piece.pieceType);
         writer.WriteValueSafe(lp.x); writer.WriteValueSafe(lp.y); writer.WriteValueSafe(lp.z);
         NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
             MSG_ATTACH, writer, NetworkDelivery.Reliable);
@@ -489,8 +510,8 @@ public class PieceSyncManager : NetworkBehaviour
         if (_pendingAttaches.Count == 0) return;
         for (int i = _pendingAttaches.Count - 1; i >= 0; i--)
         {
-            var (id, slot, nodeIdx, lp) = _pendingAttaches[i];
-            if (ApplyPieceAttach(id, slot, nodeIdx, lp))
+            var (id, slot, nodeIdx, lp, pieceType) = _pendingAttaches[i];
+            if (ApplyPieceAttach(id, slot, nodeIdx, lp, pieceType))
                 _pendingAttaches.RemoveAt(i);
         }
     }
@@ -502,24 +523,26 @@ public class PieceSyncManager : NetworkBehaviour
         reader.ReadValueSafe(out ushort id);
         reader.ReadValueSafe(out byte slot);
         reader.ReadValueSafe(out byte nodeIdx);
+        reader.ReadValueSafe(out byte pieceTypeByte);
         reader.ReadValueSafe(out float lx); reader.ReadValueSafe(out float ly); reader.ReadValueSafe(out float lz);
         var lp = new Vector3(lx, ly, lz);
+        var pieceType = (PieceNames)pieceTypeByte;
 
         bool inMap = _clientMap.ContainsKey(id);
-        if (!ApplyPieceAttach(id, slot, nodeIdx, lp))
+        if (!ApplyPieceAttach(id, slot, nodeIdx, lp, pieceType))
         {
-            _pendingAttaches.Add((id, slot, nodeIdx, lp));
-            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} → PENDING (robot not loaded yet). inMap={inMap}");
+            _pendingAttaches.Add((id, slot, nodeIdx, lp, pieceType));
+            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} type={pieceType} → PENDING (robot not loaded yet). inMap={inMap}");
         }
         else if (!_clientAttached.Contains(id))
         {
-            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} → silently skipped (no local ball). inMap={inMap}");
+            Debug.Log($"[Net][Client] MSG_ATTACH id={id} slot={slot} node={nodeIdx} type={pieceType} → silently skipped (no local ball). inMap={inMap}");
         }
     }
 
     // Returns true when the attach was definitively handled (success or skippable failure).
     // Returns false when robots aren't loaded yet — caller should buffer and retry.
-    private bool ApplyPieceAttach(ushort id, byte slot, byte nodeIdx, Vector3 localPos)
+    private bool ApplyPieceAttach(ushort id, byte slot, byte nodeIdx, Vector3 localPos, PieceNames pieceType)
     {
         if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
         if (_loadMatch == null) return false;
@@ -528,29 +551,61 @@ public class PieceSyncManager : NetworkBehaviour
         if (robot == null) return false; // robots not loaded yet — buffer and retry
 
         var nodes = robot.GetComponentsInChildren<BuildNode>();
-        if (nodeIdx >= nodes.Length) return true; // bad index, nothing to do
+        if (nodeIdx >= nodes.Length)
+        {
+            Debug.LogWarning($"[Net][Client] MSG_ATTACH id={id}: nodeIdx={nodeIdx} out of range (robot has {nodes.Length} BuildNodes)");
+            return true;
+        }
 
         var node = nodes[nodeIdx];
 
-        // Find the ball in _clientMap. If missing (preloaded ball that failed proximity
-        // registration because the robot moved > 2 m before the T=2s window), fall back
-        // to any unregistered GamePiece already parented inside the target node — that IS
-        // the preloaded ball on the client's copy of the robot.
+        // Find the ball in _clientMap. Three fallback tiers:
+        //  1. Normal: ball was registered by proximity at T=2s → found by id.
+        //  2. Preloaded fallback: ball was spawned inside this node but didn't get
+        //     proximity-matched (robot moved > 2m before T=2s window) → look for any
+        //     unregistered GamePiece already parented inside the target node.
+        //  3. Proximity fallback: field ball intaked before T=2s so server registration
+        //     position was inside the robot while client ball was still on the field →
+        //     search all client pieces for the closest unclaimed piece of the right type.
         if (!_clientMap.TryGetValue(id, out var piece) || piece == null)
         {
-            var candidate = node.GetComponentInChildren<GamePiece>();
-            if (candidate != null && !_clientMap.ContainsValue(candidate))
+            GamePiece candidate = null;
+
+            // Tier 2: preloaded ball already in node hierarchy
+            var inNode = node.GetComponentInChildren<GamePiece>();
+            if (inNode != null && !_clientMap.ContainsValue(inNode))
+                candidate = inNode;
+
+            // Tier 3: search all client pieces by type for closest unclaimed match
+            if (candidate == null)
             {
-                _clientMap[id] = candidate;
-                piece = candidate;
-                // Make kinematic so delta doesn't fight the parent-child transform.
-                if (piece.rb != null && !piece.rb.isKinematic)
+                // Refresh piece list if stale (normally populated by OnRegistrationReceived)
+                if (_clientPieces == null || _clientPieces.Length == 0)
+                    _clientPieces = FindObjectsOfType<GamePiece>();
+
+                var nodePos = node.transform.position;
+                float bestSqDist = float.MaxValue;
+                foreach (var cp in _clientPieces)
                 {
-                    piece.rb.isKinematic = true;
-                    piece.rb.interpolation = RigidbodyInterpolation.None;
+                    if (cp == null || cp.pieceType != pieceType) continue;
+                    if (_clientMap.ContainsValue(cp)) continue;
+                    float d = (cp.transform.position - nodePos).sqrMagnitude;
+                    if (d < bestSqDist) { bestSqDist = d; candidate = cp; }
                 }
+                if (candidate != null)
+                    Debug.Log($"[Net][Client] MSG_ATTACH id={id}: proximity fallback found {candidate.name} at dist={Mathf.Sqrt(bestSqDist):F1}m");
             }
-            else return true; // no local ball to attach — nothing to do
+
+            if (candidate == null)
+                return true; // no local ball to attach — nothing to do
+
+            _clientMap[id] = candidate;
+            piece = candidate;
+            if (piece.rb != null && !piece.rb.isKinematic)
+            {
+                piece.rb.isKinematic   = true;
+                piece.rb.interpolation = RigidbodyInterpolation.None;
+            }
         }
 
         // Mirror host: disable colliders so the ball doesn't clip through joints.
