@@ -373,9 +373,14 @@ public class PieceSyncManager : NetworkBehaviour
             }
 
             _clientMap[id] = piece;
-            if (piece.rb != null)
+            // Preloaded balls are already kinematic (GamePiece.Start sets them).
+            // Field balls MUST stay dynamic so the kinematic client robot can
+            // physically push them — kinematic vs kinematic = no collision response.
+            // They are made kinematic only when the host holds them (auto-attach /
+            // ApplyPieceAttach), and reverted to dynamic on MSG_DETACH.
+            if (piece.rb != null && piece.isPreloaded)
             {
-                piece.rb.isKinematic  = true;
+                piece.rb.isKinematic   = true;
                 piece.rb.interpolation = RigidbodyInterpolation.None;
             }
             mapped++;
