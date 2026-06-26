@@ -390,25 +390,16 @@ public class PieceSyncManager : NetworkBehaviour
 
     // ── Client: nearest-node lookup ───────────────────────────────────────────
 
-    // Returns the BuildNode (across all loaded robots) whose world position is closest
+    // Returns the BuildNode (across ALL scene robots) whose world position is closest
     // to worldPos and within maxDist metres, or null if none is found.
-    // The cache is rebuilt every 0.5 s so robots that load after the first delta are
-    // discovered without scanning GetComponentsInChildren every single tick.
+    // Uses FindObjectsOfType so it always sees every node regardless of slot assignment.
+    // The result is cached for 0.5 s to avoid the per-frame cost.
     private BuildNode FindNearestBuildNode(Vector3 worldPos, float maxDist)
     {
         if (_cachedNodes == null || Time.time - _nodeCacheTime > 0.5f)
         {
-            if (_loadMatch == null) _loadMatch = FindFirstObjectByType<LoadMatch>();
-            var nodeList = new List<BuildNode>();
-            if (_loadMatch != null)
-                for (int s = 0; s < 4; s++)
-                {
-                    var robot = _loadMatch.GetRobotLoaded(s);
-                    if (robot != null)
-                        nodeList.AddRange(robot.GetComponentsInChildren<BuildNode>());
-                }
-            _cachedNodes    = nodeList.ToArray();
-            _nodeCacheTime  = Time.time;
+            _cachedNodes   = FindObjectsOfType<BuildNode>();
+            _nodeCacheTime = Time.time;
         }
 
         BuildNode nearest    = null;
@@ -472,6 +463,12 @@ public class PieceSyncManager : NetworkBehaviour
                 var nearNode = FindNearestBuildNode(new Vector3(px, py, pz), 2f);
                 if (nearNode != null)
                 {
+                    // Clear stale reference from any previous node so its stowing
+                    // maintenance doesn't fight with the new attachment.
+                    var prevNode = piece.transform.parent?.GetComponent<BuildNode>();
+                    if (prevNode != null && prevNode != nearNode && prevNode.currentGamePiece == piece)
+                        prevNode.currentGamePiece = null;
+
                     if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
                     piece.transform.SetParent(nearNode.transform, false);
                     piece.transform.localPosition = Vector3.zero;
@@ -481,14 +478,15 @@ public class PieceSyncManager : NetworkBehaviour
                         piece.rb.position = piece.transform.position;
                         piece.rb.rotation = piece.transform.rotation;
                     }
-                    piece.owner             = nearNode.transform;
-                    piece.state             = GamePieceState.Stationary;
+                    piece.owner               = nearNode.transform;
+                    piece.state               = GamePieceState.Stationary;
                     nearNode.currentGamePiece = piece;
                     nearNode.currentState     = NodeState.Stowing;
                     _clientAttached.Add(id);
-                    Debug.Log($"[Net][Client] Ball {id} auto-attached via delta (nearest node)");
+                    Debug.Log($"[Net][Client] Ball {id} auto-attached via delta (nearest node {nearNode.name})");
                     continue; // Now tracked by node parenting; skip position update
                 }
+                Debug.LogWarning($"[Net][Client] Ball {id} stationary delta but no node within 2m of ({px:F1},{py:F1},{pz:F1}). cachedNodes={_cachedNodes?.Length ?? 0}");
                 // No node found yet (robots still loading) — fall through so the ball is
                 // placed kinematically at the host position. Retries on next delta tick.
             }
@@ -724,6 +722,12 @@ public class PieceSyncManager : NetworkBehaviour
                 piece.rb.interpolation = RigidbodyInterpolation.None;
             }
         }
+
+        // Clear stale reference from any previous node so its stowing maintenance
+        // doesn't fight against the new attachment target.
+        var prevAttachNode = piece.transform.parent?.GetComponent<BuildNode>();
+        if (prevAttachNode != null && prevAttachNode != node && prevAttachNode.currentGamePiece == piece)
+            prevAttachNode.currentGamePiece = null;
 
         // Mirror host: disable colliders so the ball doesn't clip through joints.
         if (piece.colliderParent != null) piece.colliderParent.SetActive(false);

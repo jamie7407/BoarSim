@@ -166,20 +166,19 @@ public class BuildNode : MonoBehaviour
             return;
         }
 
-        // On a non-host network client the host is authoritative for ALL piece physics
-        // (intake, transfer, outtake, scoring). Running these locally causes the client to
-        // re-parent and mutate ball objects that PieceSyncManager is also tracking, producing
-        // the "ball phases through robot / ball invisible" desync. Button-state forwarding
-        // happens in GameNetworkManager.SendMechInputForSlot directly from PlayerInput — it
-        // does not go through this Update — so returning early loses nothing for networking.
-        if (GameNetworkManager.Instance != null &&
-            GameNetworkManager.Instance.IsClient &&
-            !GameNetworkManager.Instance.IsHost)
-            return;
+        // On a non-host client the host is authoritative for intake / transfer / outtake.
+        // However the stowing maintenance at the bottom of Update() (teleportTo every frame)
+        // MUST also run on the client so held balls are pinned to the node and their colliders
+        // stay disabled — exactly mirroring what the host does.  Skipping it was the root
+        // cause of "ball goes through hopper on client screen."
+        bool isNonHostClient = GameNetworkManager.Instance != null &&
+                               GameNetworkManager.Instance.IsClient &&
+                               !GameNetworkManager.Instance.IsHost;
 
         var actionFinished = false;
         var actionDone = false;
 
+        if (!isNonHostClient)
         for (int i = 0; i < Actions.Length; i++)
         {
             ref NodeAction action = ref Actions[i];
