@@ -57,6 +57,13 @@ public class GameNetworkManager : NetworkBehaviour
     // re-application even when the setup coroutine completes in the same frame.
     private int _lastAppliedSetupVersion = -1;
 
+    // Triggered-event accumulator: BuildNode Tap actions (and JC Sequence/Toggle) fire a
+    // one-frame "triggered" event.  SendMechInputForSlot only polls every robotSyncEveryNFixed
+    // FixedUpdates (~60 ms), so pressing a Tap-type button between polls silently drops the
+    // event.  AccumulateClientTriggeredInputs() runs every Update to capture these events and
+    // ORs them into the next mech send so no tap is ever missed.
+    private readonly ulong[] _pendingClientTriggeredMask = new ulong[4];
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     private void Awake() { Instance = this; }
@@ -153,6 +160,61 @@ public class GameNetworkManager : NetworkBehaviour
                 _lastAppliedSetupVersion = version;
                 ApplyRoleToLoadedMatch();
             }
+        }
+
+        // Capture one-frame "triggered" events every Update so Tap-type BuildNode actions
+        // (and JC Sequence/Toggle setpoints) aren't missed by the 3-tick mech-input poll.
+        if (IsClient && !IsHost)
+            AccumulateClientTriggeredInputs();
+    }
+
+    // Traverses client-owned robots with the same bit layout as SendMechInputForSlot and
+    // ORs any triggered events into _pendingClientTriggeredMask.  Consumed + cleared at the
+    // next SendMechInputForSlot call so nothing is double-counted.
+    private void AccumulateClientTriggeredInputs()
+    {
+        if (_loadMatch == null) return;
+        var mode = (PlayMode)_netPlayMode.Value;
+        var (first, last) = ClientSlots(mode);
+
+        for (int slot = first; slot <= last; slot++)
+        {
+            var robot = _loadMatch.GetRobotLoaded(slot);
+            if (robot == null) continue;
+            var pi = robot.GetComponent<PlayerInput>();
+            if (pi == null) continue;
+            var actionMap = pi.actions.FindActionMap("Robot");
+            if (actionMap == null) continue;
+
+            int bit = 0;
+
+            foreach (var jc in robot.GetComponentsInChildren<JointController>())
+            {
+                if (jc.setPoints == null) continue;
+                for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
+                {
+                    var spData = jc.setPoints[sp];
+                    var ca = actionMap.FindAction(spData.controllerButton.ToString());
+                    var ka = actionMap.FindAction(spData.keyboardButton.ToString());
+                    bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
+                    if (t) _pendingClientTriggeredMask[slot] |= 1UL << bit;
+                }
+            }
+
+            foreach (var bn in robot.GetComponentsInChildren<BuildNode>())
+            {
+                if (bn.Actions == null) continue;
+                for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
+                {
+                    var act = bn.Actions[a];
+                    if (!act.InputRequired) continue; // AlwaysPerform — no trigger to capture
+                    var ca = actionMap.FindAction(act.ControllerButton.ToString());
+                    var ka = actionMap.FindAction(act.KeyboardButton.ToString());
+                    bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
+                    if (t) _pendingClientTriggeredMask[slot] |= 1UL << bit;
+                }
+            }
+            // AutoAim uses hold-state only — no triggered accumulation needed.
         }
     }
 
@@ -632,6 +694,11 @@ public class GameNetworkManager : NetworkBehaviour
             if (aa.GetButtonHeld()) held |= 1UL << bit;
             bit++;
         }
+
+        // Flush triggers captured between polls (Update runs every frame, this runs every
+        // robotSyncEveryNFixed ticks — without this, Tap-type actions pressed mid-gap are lost).
+        triggered |= _pendingClientTriggeredMask[slot];
+        _pendingClientTriggeredMask[slot] = 0;
 
         // Always send so the server sees held=false when the button is released.
         SendRobotActionsServerRpc(slot, triggered, held);

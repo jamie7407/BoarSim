@@ -373,15 +373,23 @@ public class PieceSyncManager : NetworkBehaviour
             }
 
             _clientMap[id] = piece;
-            // Preloaded balls are already kinematic (GamePiece.Start sets them).
-            // Field balls MUST stay dynamic so the kinematic client robot can
-            // physically push them — kinematic vs kinematic = no collision response.
-            // They are made kinematic only when the host holds them (auto-attach /
-            // ApplyPieceAttach), and reverted to dynamic on MSG_DETACH.
-            if (piece.rb != null && piece.isPreloaded)
+            if (piece.rb != null)
             {
-                piece.rb.isKinematic   = true;
-                piece.rb.interpolation = RigidbodyInterpolation.None;
+                if (piece.isPreloaded)
+                {
+                    // Preloaded balls are already kinematic (GamePiece.Start sets them).
+                    piece.rb.isKinematic   = true;
+                    piece.rb.interpolation = RigidbodyInterpolation.None;
+                }
+                else
+                {
+                    // Field balls stay dynamic so the kinematic robot can physically push
+                    // them — kinematic vs kinematic = no collision response.
+                    // ContinuousSpeculative prevents tunneling when the robot moves fast:
+                    // without it the kinematic robot can jump through a dynamic ball in one
+                    // physics step, causing the ball to "jump" as depenetration resolves.
+                    piece.rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                }
             }
             mapped++;
         }
