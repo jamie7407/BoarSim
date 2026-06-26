@@ -271,6 +271,7 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb == null) continue;
                 rb.isKinematic = true;
                 rb.interpolation = RigidbodyInterpolation.None;
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
     }
@@ -293,6 +294,11 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
                 rb.interpolation = RigidbodyInterpolation.None;
+                // ContinuousSpeculative on the kinematic robot expands its AABB by its
+                // computed velocity ((newPos - oldPos) / deltaTime), so stationary dynamic
+                // balls in the robot's path are speculatively contacted rather than
+                // tunnelled through.  Must come AFTER isKinematic=true.
+                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
     }
@@ -549,6 +555,7 @@ public class GameNetworkManager : NetworkBehaviour
                     {
                         rb.isKinematic = true;
                         rb.interpolation = RigidbodyInterpolation.None;
+                        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                     }
                     fbuf.Add(rb);
                 }
