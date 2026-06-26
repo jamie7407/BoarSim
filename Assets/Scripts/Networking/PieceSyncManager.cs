@@ -62,6 +62,11 @@ public class PieceSyncManager : NetworkBehaviour
     // Cached BuildNode list across all loaded robots; refreshed every 0.5 s.
     private BuildNode[] _cachedNodes;
     private float       _nodeCacheTime;
+    // Cached robot colliders for manual ball-push; refreshed every 1 s.
+    // Kinematic robots don't generate reliable CCD contacts when teleported, so we
+    // manually depenetrate dynamic field balls in FixedUpdate instead.
+    private Collider[] _cachedRobotColliders = System.Array.Empty<Collider>();
+    private float      _robotColCacheTime = -99f;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -223,6 +228,14 @@ public class PieceSyncManager : NetworkBehaviour
         }
 
         if (!IsClient) return;
+
+        // Refresh robot collider cache once per second so newly loaded robots are picked up.
+        if (Time.time - _robotColCacheTime > 1f)
+        {
+            RefreshRobotColliderCache();
+            _robotColCacheTime = Time.time;
+        }
+
         // Keep rb.position in sync with transform.position for kinematic attached balls.
         // When the robot drives, the child transform moves but the physics engine's rb.position
         // would otherwise lag — stale physics position breaks collisions and the detach-to-dynamic
@@ -233,6 +246,10 @@ public class PieceSyncManager : NetworkBehaviour
             ap.rb.position = ap.transform.position;
             ap.rb.rotation = ap.transform.rotation;
         }
+
+        // Push dynamic balls out of kinematic robot colliders. Must run after the attached-ball
+        // sync so held-ball positions are already correct when we check _clientAttached.
+        ClientManualBallPush();
     }
 
     private void SendDelta()
@@ -591,6 +608,106 @@ public class PieceSyncManager : NetworkBehaviour
         writer.WriteValueSafe(vel.x); writer.WriteValueSafe(vel.y); writer.WriteValueSafe(vel.z);
         NetworkManager.CustomMessagingManager.SendNamedMessageToAll(
             MSG_DETACH, writer, NetworkDelivery.Reliable);
+    }
+
+    // ── Client: manual ball-robot collision (bypasses CCD on kinematic bots) ────
+
+    private void RefreshRobotColliderCache()
+    {
+        if (_loadMatch == null) return;
+        var cols = new List<Collider>();
+        for (int s = 0; s < 4; s++)
+        {
+            var robot = _loadMatch.GetRobotLoaded(s);
+            if (robot == null) continue;
+            foreach (var col in robot.GetComponentsInChildren<Collider>())
+            {
+                if (col.isTrigger) continue;
+                if (col.GetComponentInParent<GamePiece>() != null) continue;
+                cols.Add(col);
+            }
+        }
+        _cachedRobotColliders = cols.ToArray();
+    }
+
+    // Every FixedUpdate: scan dynamic field balls and push any that overlap a
+    // kinematic robot collider outward. Unity's speculative CCD is unreliable for
+    // teleporting kinematic bodies (zero PhysX velocity computed → no AABB expansion),
+    // so we resolve ball-robot penetrations here instead of relying on the physics engine.
+    private void ClientManualBallPush()
+    {
+        if (_cachedRobotColliders.Length == 0) return;
+
+        foreach (var kvp in _clientMap)
+        {
+            var piece = kvp.Value;
+            if (piece == null || piece.rb == null || piece.rb.isKinematic) continue;
+            if (_clientAttached.Contains(kvp.Key)) continue;
+
+            // Determine ball radius from its SphereCollider; fall back to a sensible default.
+            float ballRadius = 0.08f;
+            if (piece.colliderParent != null)
+            {
+                var sc = piece.colliderParent.GetComponentInChildren<SphereCollider>();
+                if (sc != null)
+                    ballRadius = sc.radius * Mathf.Max(sc.transform.lossyScale.x,
+                                                       sc.transform.lossyScale.y,
+                                                       sc.transform.lossyScale.z);
+            }
+
+            var ballPos = piece.rb.position;
+
+            foreach (var rc in _cachedRobotColliders)
+            {
+                if (rc == null) continue;
+
+                // Cheap pre-filter: bounding sphere of the robot collider + ball radius.
+                var rBounds = rc.bounds;
+                float rReach = rBounds.extents.magnitude + ballRadius + 0.05f;
+                if ((rBounds.center - ballPos).sqrMagnitude > rReach * rReach) continue;
+
+                // Nearest point on (or inside) the robot collider surface to the ball centre.
+                Vector3 closest = rc.ClosestPoint(ballPos);
+                Vector3 sep     = ballPos - closest;
+                float   dist    = sep.magnitude;
+
+                Vector3 pushDir;
+                float   overlap;
+
+                if (dist < 0.001f)
+                {
+                    // Ball centre is inside the collider — ClosestPoint returns ballPos.
+                    // Push away from the attached rigidbody's centre of mass.
+                    var arb = rc.attachedRigidbody;
+                    pushDir = (ballPos - (arb != null ? arb.worldCenterOfMass : rBounds.center)).normalized;
+                    if (pushDir.sqrMagnitude < 0.01f) pushDir = Vector3.up;
+                    overlap = ballRadius + 0.01f;
+                }
+                else if (dist < ballRadius)
+                {
+                    pushDir = sep / dist;
+                    overlap = ballRadius - dist;
+                }
+                else
+                {
+                    continue; // no overlap with this collider
+                }
+
+                if (piece.rb.IsSleeping()) piece.rb.WakeUp();
+
+                // Snap ball out of overlap so it isn't re-penetrated next frame.
+                var corrected = ballPos + pushDir * (overlap + 0.01f);
+                piece.rb.position        = corrected;
+                piece.transform.position = corrected;
+
+                // Ensure the ball moves away from the robot at least at pushSpeed.
+                float outward = Vector3.Dot(piece.rb.velocity, pushDir);
+                if (outward < 2f)
+                    piece.rb.velocity += pushDir * (2f - outward);
+
+                break; // one robot collider resolved per ball per tick is enough
+            }
+        }
     }
 
     // ── Client: per-frame maintenance + pending attach retry ─────────────────
