@@ -258,11 +258,8 @@ public class GameNetworkManager : NetworkBehaviour
             MakeChildRigidbodiesKinematic();
 
             // Host is authoritative for ALL robot physics. Make every root Rigidbody
-            // kinematic so SyncRobotsClientRpc drives it cleanly via rb.position/rb.rotation.
-            // Without this P2's non-kinematic root fights the host position every frame,
-            // causing the glitch-then-revert behaviour.
-            // Disable interpolation so rb.position assignments snap immediately; interpolation
-            // causes the visual transform to drift toward the target rather than snapping.
+            // kinematic so MSG_JOINT_SYNC drives it via MovePosition (sweep, not teleport).
+            // Interpolate lets the visual track smoothly between physics steps.
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
@@ -270,7 +267,7 @@ public class GameNetworkManager : NetworkBehaviour
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -293,11 +290,7 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
-                // ContinuousSpeculative on the kinematic robot expands its AABB by its
-                // computed velocity ((newPos - oldPos) / deltaTime), so stationary dynamic
-                // balls in the robot's path are speculatively contacted rather than
-                // tunnelled through.  Must come AFTER isKinematic=true.
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -427,14 +420,10 @@ public class GameNetworkManager : NetworkBehaviour
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
-        // Always update the visual transform immediately so joint sync (which also sets the
-        // root from the embedded position) doesn't see a stale root transform, which would
-        // make joints appear disconnected from the robot body between FixedUpdate ticks.
-        robot.transform.SetPositionAndRotation(pos, rot);
         if (rb != null && rb.isKinematic)
         {
-            rb.position = pos;
-            rb.rotation = rot;
+            rb.MovePosition(pos);
+            rb.MoveRotation(rot);
         }
     }
 
@@ -524,16 +513,15 @@ public class GameNetworkManager : NetworkBehaviour
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // Apply root from this packet. Setting both the transform (immediate visual) and
-            // rb.position (physics target) is critical: without the transform update, the
-            // root body stays at its old visual position until FixedUpdate fires, making
-            // joint arms visually disconnect from the body between sync ticks.
-            if (robot != null)
-                robot.transform.SetPositionAndRotation(rootPos, rootRot);
+            // MovePosition/MoveRotation sweep the kinematic body from its last physics
+            // position to the target, generating contacts with dynamic balls along the
+            // entire path. rb.position= teleports (no sweep), which is why fast movement
+            // causes balls to tunnel through the robot. No explicit transform write needed:
+            // with RigidbodyInterpolation.Interpolate the visual tracks smoothly.
             if (rootRb != null)
             {
-                rootRb.position = rootPos;
-                rootRb.rotation = rootRot;
+                rootRb.MovePosition(rootPos);
+                rootRb.MoveRotation(rootRot);
             }
 
             // Build filtered joint list on the fly every packet.
@@ -550,11 +538,11 @@ public class GameNetworkManager : NetworkBehaviour
                     if (rb == rootRb) continue;
                     if (rb.GetComponent<GamePiece>() != null) continue;
                     // Flip kinematic here if MakeChildRigidbodiesKinematic hasn't fired yet.
-                    // Without this, rb.position is ignored and physics overrides the transform.
+                    // Without this, MovePosition is ignored and physics overrides the joint.
                     if (!rb.isKinematic)
                     {
                         rb.isKinematic = true;
-                        rb.interpolation = RigidbodyInterpolation.None;
+                        rb.interpolation = RigidbodyInterpolation.Interpolate;
                         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                     }
                     fbuf.Add(rb);
@@ -578,12 +566,10 @@ public class GameNetworkManager : NetworkBehaviour
 
                 var worldPos = new Vector3(px, py, pz);
                 var worldRot = new Quaternion(qx, qy, qz, qw);
-                // Set both transform (immediate visual) and rb.position (physics engine).
-                // Both are needed: transform for this frame's render, rb.position so the
-                // physics engine agrees and doesn't snap back on the next FixedUpdate.
-                rb.transform.SetPositionAndRotation(worldPos, worldRot);
-                rb.position = worldPos;
-                rb.rotation = worldRot;
+                // MovePosition sweeps this kinematic joint from its last physics position
+                // to worldPos, generating contacts with dynamic balls the whole way.
+                rb.MovePosition(worldPos);
+                rb.MoveRotation(worldRot);
             }
         }
     }
