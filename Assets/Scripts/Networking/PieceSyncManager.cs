@@ -247,9 +247,9 @@ public class PieceSyncManager : NetworkBehaviour
             ap.rb.rotation = ap.transform.rotation;
         }
 
-        // Push dynamic balls out of kinematic robot colliders. Must run after the attached-ball
-        // sync so held-ball positions are already correct when we check _clientAttached.
-        ClientManualBallPush();
+        // Ball-robot collision is now handled by Rigidbody.MovePosition in GameNetworkManager:
+        // kinematic joints sweep to their target each FixedUpdate, generating contacts with
+        // dynamic balls natively. ClientManualBallPush is no longer called.
     }
 
     private void SendDelta()

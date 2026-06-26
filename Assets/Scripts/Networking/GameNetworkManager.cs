@@ -26,8 +26,11 @@ public class GameNetworkManager : NetworkBehaviour
     // OptionsMenuController subscribes to apply host settings and start the match automatically.
     public static event Action<MatchSettings> OnNetworkMatchStart;
 
-    [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz fixed rate)")]
-    [SerializeField] private int robotSyncEveryNFixed = 3;
+    // Sync every FixedUpdate (50 Hz) so each MovePosition sweep covers exactly one
+    // tick's worth of displacement. At N=3 (16.7 Hz) the sweep covers 3 ticks in 1
+    // step, tripling the apparent kinematic velocity and causing ball-pile explosions.
+    [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (1 = 50 Hz, no velocity amplification)")]
+    [SerializeField] private int robotSyncEveryNFixed = 1;
 
     private const string MSG_JOINT_SYNC = "BoarSim.JointSync";
 
@@ -421,9 +424,26 @@ public class GameNetworkManager : NetworkBehaviour
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
         if (rb != null && rb.isKinematic)
+            KinematicMove(rb, pos, rot);
+    }
+
+    // Sweep a kinematic body to target using MovePosition (generates contacts with
+    // dynamic balls). Falls back to rb.position= for large jumps (initial load,
+    // respawn) — sweeping metres at once would compute a huge apparent velocity and
+    // launch balls across the field.
+    private static void KinematicMove(Rigidbody rb, Vector3 pos, Quaternion rot)
+    {
+        // 0.3 m ≈ max realistic per-tick displacement at ~15 m/s robot top speed.
+        // Anything larger is a spawn warp — teleport instead.
+        if ((pos - rb.position).sqrMagnitude < 0.09f)   // 0.3 m²
         {
             rb.MovePosition(pos);
             rb.MoveRotation(rot);
+        }
+        else
+        {
+            rb.position = pos;
+            rb.rotation = rot;
         }
     }
 
@@ -513,16 +533,12 @@ public class GameNetworkManager : NetworkBehaviour
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // MovePosition/MoveRotation sweep the kinematic body from its last physics
-            // position to the target, generating contacts with dynamic balls along the
-            // entire path. rb.position= teleports (no sweep), which is why fast movement
-            // causes balls to tunnel through the robot. No explicit transform write needed:
-            // with RigidbodyInterpolation.Interpolate the visual tracks smoothly.
+            // MovePosition sweeps the kinematic body, generating contacts with dynamic
+            // balls along the path. For large jumps (robot loading from spawn, respawning)
+            // use rb.position= instead — sweeping 5+ metres at once would appear to PhysX
+            // as a 250 m/s collision and launch every ball on the field.
             if (rootRb != null)
-            {
-                rootRb.MovePosition(rootPos);
-                rootRb.MoveRotation(rootRot);
-            }
+                KinematicMove(rootRb, rootPos, rootRot);
 
             // Build filtered joint list on the fly every packet.
             // Making RBs kinematic inline means correctness doesn't depend on
@@ -566,10 +582,7 @@ public class GameNetworkManager : NetworkBehaviour
 
                 var worldPos = new Vector3(px, py, pz);
                 var worldRot = new Quaternion(qx, qy, qz, qw);
-                // MovePosition sweeps this kinematic joint from its last physics position
-                // to worldPos, generating contacts with dynamic balls the whole way.
-                rb.MovePosition(worldPos);
-                rb.MoveRotation(worldRot);
+                KinematicMove(rb, worldPos, worldRot);
             }
         }
     }
