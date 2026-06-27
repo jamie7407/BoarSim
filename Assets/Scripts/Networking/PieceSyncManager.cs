@@ -267,19 +267,26 @@ public class PieceSyncManager : NetworkBehaviour
         // Called every FixedUpdate (50 Hz) so balls move continuously between 20 Hz server
         // updates. Without this, kinematic MovePosition only moves the ball once then holds it
         // still for ~50ms until the next delta arrives — visually choppy at any ball speed.
-        // Capped at 0.15 s to avoid large errors when packets are late or lost.
+        //
+        // No gravity term: the server velocity already reflects the current trajectory including
+        // gravity on the host. Adding gravity again here causes floor-rolling balls (vy≈0) to
+        // sink through the map geometry within 100ms. Linear extrapolation is accurate to within
+        // a few cm over one 50ms sync window and avoids all floor-penetration artefacts.
+        //
+        // Cap at 80ms (4 FixedUpdate ticks). Beyond that, error from unmodelled collisions
+        // accumulates faster than it's corrected, causing visible rubber-banding.
         foreach (var kvp in _recvPos)
         {
             var id = kvp.Key;
             if (!_recvTime.TryGetValue(id, out float t0)) continue;
             float dt = Time.fixedTime - t0;
-            if (dt <= 0f || dt > 0.15f) continue;
+            if (dt <= 0f || dt > 0.08f) continue;
 
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null) continue;
             if (_clientAttached.Contains(id)) continue;
 
             var vel = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
-            var projected = kvp.Value + vel * dt + 0.5f * Physics.gravity * dt * dt;
+            var projected = kvp.Value + vel * dt;
             piece.rb.MovePosition(projected);
         }
 
