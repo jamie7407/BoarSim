@@ -194,10 +194,9 @@ public class PieceSyncManager : NetworkBehaviour
     {
         // Deterministic registration: _serverPieces is already sorted by HierarchyKey.
         // Send (id, type) for every piece in that sorted order — no positions needed.
-        // The client sorts its own pieces by the same key and matches by index, so
-        // client_sorted[i].id == server_sorted[i].id without any proximity math.
-        // Held/stationary balls are included: their client counterpart is still at spawn
-        // position but the sort key (hierarchy path) is position-independent.
+        // Chunked into ≤350 entries per MSG_REG so each packet stays under NGO's ~1400-byte MTU.
+        // Each chunk carries its startOffset so the client maps server_sorted[startOffset+i]
+        // → client_sorted[startOffset+i] correctly.
         var toSend = new List<(ushort id, byte type)>();
         foreach (var piece in _serverPieces)
         {
@@ -206,17 +205,22 @@ public class PieceSyncManager : NetworkBehaviour
             toSend.Add((id, (byte)piece.pieceType));
         }
 
-        // Per entry: id (2) + type (1) = 3 bytes; plus 2-byte count prefix.
-        int bufSize = 2 + toSend.Count * 3;
-        using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
-        writer.WriteValueSafe((ushort)toSend.Count);
-        foreach (var (id, type) in toSend)
+        // startOffset(2) + chunkCount(2) + entries(3 each): 4 + 350×3 = 1054 bytes max per chunk.
+        const int kChunk = 350;
+        for (int start = 0; start < toSend.Count; start += kChunk)
         {
-            writer.WriteValueSafe(id);
-            writer.WriteValueSafe(type);
+            int count   = Mathf.Min(kChunk, toSend.Count - start);
+            int bufSize = 4 + count * 3;
+            using var writer = new FastBufferWriter(bufSize, Allocator.Temp);
+            writer.WriteValueSafe((ushort)start);  // startOffset into the global sorted list
+            writer.WriteValueSafe((ushort)count);  // entries in this chunk
+            for (int i = start; i < start + count; i++)
+            {
+                writer.WriteValueSafe(toSend[i].id);
+                writer.WriteValueSafe(toSend[i].type);
+            }
+            NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_REG, writer, NetworkDelivery.Reliable);
         }
-
-        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_REG, writer, NetworkDelivery.Reliable);
     }
 
     // ── Server: delta sync ────────────────────────────────────────────────────
@@ -278,9 +282,12 @@ public class PieceSyncManager : NetworkBehaviour
 
         if (_serverPieces.Length == 0) return;
 
-        // Worst case per entry: id(2) + pos(12) + rot(16) + flags(1) + vel(12) + angVel(12) = 55
-        int maxBuf = _serverPieces.Length * 56;
-        using var writer = new FastBufferWriter(maxBuf, Allocator.Temp);
+        // Each MSG_DELTA packet's payload is capped at kMaxPayload bytes so it fits within
+        // NGO's ~1400-byte MTU. Entries are variable-size: sleeping=31 bytes, active=55 bytes.
+        // We flush the current writer and start a fresh one whenever the next entry won't fit.
+        // The client reads entries until the buffer is exhausted, so each packet is self-contained.
+        const int kMaxPayload = 1100;
+        var writer = new FastBufferWriter(kMaxPayload, Allocator.Temp);
 
         for (int i = 0; i < _serverPieces.Length; i++)
         {
@@ -336,6 +343,16 @@ public class PieceSyncManager : NetworkBehaviour
             byte flags = 0;
             if (sleeping)     flags |= 1;
             if (isStationary) flags |= 2;
+
+            // Flush the current packet and start a new one if this entry won't fit.
+            int entrySize = sleeping ? 31 : 55;
+            if (writer.Position > 0 && writer.Position + entrySize > kMaxPayload)
+            {
+                NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
+                writer.Dispose();
+                writer = new FastBufferWriter(kMaxPayload, Allocator.Temp);
+            }
+
             writer.WriteValueSafe(id);
             writer.WriteValueSafe(pos.x); writer.WriteValueSafe(pos.y); writer.WriteValueSafe(pos.z);
             writer.WriteValueSafe(rot.x); writer.WriteValueSafe(rot.y); writer.WriteValueSafe(rot.z); writer.WriteValueSafe(rot.w);
@@ -350,14 +367,16 @@ public class PieceSyncManager : NetworkBehaviour
             }
         }
 
-        if (writer.Position == 0) return;
-        NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
+        if (writer.Position > 0)
+            NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
+        writer.Dispose();
     }
 
     // ── Client: receive registration ──────────────────────────────────────────
 
     private void OnRegistrationReceived(ulong senderId, FastBufferReader reader)
     {
+        reader.ReadValueSafe(out ushort startOffset);
         reader.ReadValueSafe(out ushort count);
         var entries = new (ushort id, PieceNames type)[count];
         for (int i = 0; i < count; i++)
@@ -367,32 +386,39 @@ public class PieceSyncManager : NetworkBehaviour
             entries[i] = (id, (PieceNames)typeB);
         }
 
-        // Sort client pieces by the same hierarchy key the server used.
+        // Sort client pieces on the first chunk of each registration cycle (startOffset == 0).
         // Server sorted its pieces, assigned IDs in that order, and sent them in order.
-        // client_sorted[i] is therefore the same physical ball as server_sorted[i].
-        // No proximity math — position doesn't matter, only scene structure.
-        _clientPieces = FindObjectsOfType<GamePiece>();
-        System.Array.Sort(_clientPieces, (a, b) =>
+        // client_sorted[startOffset + i] is the same physical ball as server_sorted[startOffset + i].
+        // Reliable delivery guarantees chunk 0 arrives before chunk 1, so the sort
+        // happens exactly once per registration before any entries are mapped.
+        if (startOffset == 0)
         {
-            if (a == null && b == null) return  0;
-            if (a == null)             return  1;
-            if (b == null)             return -1;
-            return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
-                                  System.StringComparison.Ordinal);
-        });
+            _clientPieces = FindObjectsOfType<GamePiece>();
+            System.Array.Sort(_clientPieces, (a, b) =>
+            {
+                if (a == null && b == null) return  0;
+                if (a == null)             return  1;
+                if (b == null)             return -1;
+                return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
+                                      System.StringComparison.Ordinal);
+            });
+        }
+
+        if (_clientPieces == null) return; // chunk 0 hasn't arrived yet (shouldn't happen with Reliable)
 
         int mapped = 0;
-        int limit  = Mathf.Min(count, _clientPieces.Length);
-        for (int i = 0; i < limit; i++)
+        for (int i = 0; i < count; i++)
         {
             var (id, type) = entries[i];
-            var piece      = _clientPieces[i];
+            int clientIdx  = startOffset + i;
+            if (clientIdx >= _clientPieces.Length) break;
+            var piece = _clientPieces[clientIdx];
             if (piece == null) continue;
             if (_clientMap.ContainsKey(id)) continue; // re-registration; already mapped
 
             if (piece.pieceType != type)
             {
-                Debug.LogWarning($"[Net][Client] Registration index {i}: server type={type} " +
+                Debug.LogWarning($"[Net][Client] Registration index {clientIdx}: server type={type} " +
                                  $"client type={piece.pieceType}. Scene hierarchy may differ between machines.");
                 continue;
             }
@@ -419,11 +445,7 @@ public class PieceSyncManager : NetworkBehaviour
             mapped++;
         }
 
-        if (_clientPieces.Length != count)
-            Debug.LogWarning($"[Net][Client] Registration count mismatch: server={count} client={_clientPieces.Length}. " +
-                             "Some balls will not be mapped until next registration cycle.");
-
-        Debug.Log($"[Net][Client] Registration complete: {mapped} new, {_clientMap.Count} total, server={count}, client pieces={_clientPieces.Length}");
+        Debug.Log($"[Net][Client] Registration chunk offset={startOffset} count={count}: {mapped} new, {_clientMap.Count} total, client pieces={_clientPieces.Length}");
     }
 
     // ── Client: nearest-node lookup ───────────────────────────────────────────
@@ -560,7 +582,7 @@ public class PieceSyncManager : NetworkBehaviour
         }
         if (slot < 0 || slotRobot == null)
         {
-            Debug.LogWarning($"[Net][Host] SendPieceAttach id={id}: BuildNode not child of any loaded robot");
+            // Ball is held by a field node (e.g. Tunnel scoring zone), not a robot — no MSG_ATTACH needed.
             return;
         }
 
