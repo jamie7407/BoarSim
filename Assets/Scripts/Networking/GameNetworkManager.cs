@@ -269,11 +269,9 @@ public class GameNetworkManager : NetworkBehaviour
             MakeChildRigidbodiesKinematic();
 
             // Host is authoritative for ALL robot physics. Make every root Rigidbody
-            // kinematic so MSG_JOINT_SYNC drives it via MovePosition (sweep, not teleport).
-            // Use None interpolation — Interpolate writes transform.position every Update
-            // frame, and Physics.autoSyncTransforms=1 immediately syncs that to rb.position,
-            // corrupting the starting point of the next MovePosition sweep and causing
-            // velocity amplification that explodes ball piles.
+            // kinematic so MSG_JOINT_SYNC drives it via rb.position= (teleport).
+            // Use None interpolation to prevent transform.position writes from fighting
+            // the physics position we set each FixedUpdate.
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
@@ -394,10 +392,9 @@ public class GameNetworkManager : NetworkBehaviour
 
     private void FixedUpdate()
     {
-        // Client: consume buffered MovePosition targets — exactly one per physics step.
-        // EarlyUpdate (where NGO delivers packets) can batch multiple sync packets before
-        // a single FixedUpdate runs. Without buffering, only the last packet's MovePosition
-        // is applied but the sweep covers N ticks → N× velocity → pile explosion.
+        // Client: apply buffered kinematic teleport targets. Buffering in a dict means
+        // multiple packets arriving in the same EarlyUpdate are deduplicated — only the
+        // latest position per Rigidbody is applied.
         if (IsClient && !IsHost && _kinematicTargets.Count > 0)
         {
             foreach (var kvp in _kinematicTargets)
@@ -452,24 +449,14 @@ public class GameNetworkManager : NetworkBehaviour
             _kinematicTargets[rb] = (pos, rot);
     }
 
-    // Sweep a kinematic body to target using MovePosition (generates contacts with
-    // dynamic balls). Falls back to rb.position= for large jumps (initial load,
-    // respawn) — sweeping metres at once would compute a huge apparent velocity and
-    // launch balls across the field.
+    // Teleport a kinematic body to target position. rb.position= does not generate
+    // PhysX contacts, so the kinematic robot body never imparts infinite-mass impulses
+    // on nearby dynamic balls. Ball positions are authoritatively driven by the host's
+    // physics and shown on the client via MSG_DELTA, so local collision is not needed.
     private static void KinematicMove(Rigidbody rb, Vector3 pos, Quaternion rot)
     {
-        // 0.3 m ≈ max realistic per-tick displacement at ~15 m/s robot top speed.
-        // Anything larger is a spawn warp — teleport instead.
-        if ((pos - rb.position).sqrMagnitude < 0.09f)   // 0.3 m²
-        {
-            rb.MovePosition(pos);
-            rb.MoveRotation(rot);
-        }
-        else
-        {
-            rb.position = pos;
-            rb.rotation = rot;
-        }
+        rb.position = pos;
+        rb.rotation = rot;
     }
 
     // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots

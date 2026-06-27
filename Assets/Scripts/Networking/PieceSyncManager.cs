@@ -293,7 +293,11 @@ public class PieceSyncManager : NetworkBehaviour
             // are already held get their MSG_ATTACH on the first tick.
             bool wasStationary = _lastPieceState.TryGetValue(id, out var prevState) &&
                                  prevState == GamePieceState.Stationary;
-            if (isStationary && !wasStationary) SendPieceAttach(id, piece);
+            if (isStationary && !wasStationary)
+            {
+                Debug.Log($"[Net][Host] Ball {id} World→Stationary, owner={piece.owner?.name ?? "null"}");
+                SendPieceAttach(id, piece);
+            }
             else if (!isStationary && wasStationary) SendPieceDetach(id, piece);
             _lastPieceState[id] = piece.state;
 
@@ -541,20 +545,29 @@ public class PieceSyncManager : NetworkBehaviour
                    ?? piece.owner.GetComponentInParent<BuildNode>();
         if (ownNode == null) return;
 
-        var swerve = ownNode.GetComponentInParent<SwerveController>();
-        if (swerve == null) return;
-
+        // Find robot slot by hierarchy membership — IsChildOf covers both the root
+        // itself and any child, so this works regardless of which component is on root.
         int slot = -1;
+        GameObject slotRobot = null;
         for (int s = 0; s < 4; s++)
-            if (_loadMatch.GetRobotLoaded(s) == swerve.gameObject) { slot = s; break; }
-        if (slot < 0) return;
+        {
+            var r = _loadMatch.GetRobotLoaded(s);
+            if (r != null && ownNode.transform.IsChildOf(r.transform)) { slot = s; slotRobot = r; break; }
+        }
+        if (slot < 0 || slotRobot == null)
+        {
+            Debug.LogWarning($"[Net][Host] SendPieceAttach id={id}: BuildNode not child of any loaded robot");
+            return;
+        }
 
-        var nodes = swerve.GetComponentsInChildren<BuildNode>();
+        // Use the robot root for node enumeration so index matches ApplyPieceAttach on client.
+        var nodes = slotRobot.GetComponentsInChildren<BuildNode>();
         int nodeIdx = System.Array.IndexOf(nodes, ownNode);
         if (nodeIdx < 0 || nodeIdx > 255) return;
 
         // Local position of ball in node space (usually near zero after teleportTo).
         var lp = ownNode.transform.InverseTransformPoint(piece.transform.position);
+        Debug.Log($"[Net][Host] SendPieceAttach id={id} slot={slot} nodeIdx={nodeIdx} type={piece.pieceType}");
 
         // pieceType is included so the client can do a proximity fallback search when
         // the ball isn't in _clientMap (e.g. intaked before the T=2s registration window).
