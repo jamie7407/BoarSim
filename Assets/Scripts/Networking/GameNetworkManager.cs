@@ -128,7 +128,7 @@ public class GameNetworkManager : NetworkBehaviour
         if (IsServer)
             NetworkManager.OnClientConnectedCallback -= OnClientConnected;
 
-        if (IsClient && !IsHost)
+        if (IsClient && !IsHost && NetworkManager.CustomMessagingManager != null)
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_JOINT_SYNC);
     }
 

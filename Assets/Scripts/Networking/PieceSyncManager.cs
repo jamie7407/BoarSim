@@ -95,7 +95,7 @@ public class PieceSyncManager : NetworkBehaviour
 
     public override void OnNetworkDespawn()
     {
-        if (IsClient && !IsServer)
+        if (IsClient && !IsServer && NetworkManager.CustomMessagingManager != null)
         {
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_REG);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELTA);

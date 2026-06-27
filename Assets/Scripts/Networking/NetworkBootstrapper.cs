@@ -68,6 +68,7 @@ public class NetworkBootstrapper : MonoBehaviour
         var joinCode   = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
 
         var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
+        transport.MaxPacketQueueSize = 512;
         transport.SetRelayServerData(new RelayServerData(allocation, "dtls"));
 
         NetworkManager.Singleton.StartHost();
@@ -84,6 +85,7 @@ public class NetworkBootstrapper : MonoBehaviour
         var allocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
 
         var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
+        transport.MaxPacketQueueSize = 512;
         transport.SetRelayServerData(new RelayServerData(allocation, "dtls"));
 
         NetworkManager.Singleton.StartClient();
