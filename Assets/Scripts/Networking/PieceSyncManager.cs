@@ -426,21 +426,14 @@ public class PieceSyncManager : NetworkBehaviour
             _clientMap[id] = piece;
             if (piece.rb != null)
             {
-                if (piece.isPreloaded)
-                {
-                    // Preloaded balls are already kinematic (GamePiece.Start sets them).
-                    piece.rb.isKinematic   = true;
-                    piece.rb.interpolation = RigidbodyInterpolation.None;
-                }
-                else
-                {
-                    // Field balls stay dynamic so the kinematic robot can physically push
-                    // them — kinematic vs kinematic = no collision response.
-                    // ContinuousSpeculative prevents tunneling when the robot moves fast:
-                    // without it the kinematic robot can jump through a dynamic ball in one
-                    // physics step, causing the ball to "jump" as depenetration resolves.
-                    piece.rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-                }
+                // All client balls are kinematic — the host runs all physics and sends authoritative
+                // positions via delta. Making dynamic balls kinematic here prevents local gravity and
+                // contact forces from fighting against the 50 Hz delta snap corrections, which caused
+                // visible jitter. Kinematic-vs-kinematic (robot and balls) generates no contacts,
+                // so the client robot can drive through balls — the host handles actual collision
+                // response and the results are reflected in subsequent delta packets.
+                piece.rb.isKinematic   = true;
+                piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
             }
             mapped++;
         }
@@ -487,14 +480,12 @@ public class PieceSyncManager : NetworkBehaviour
             bool sleeping   = (flags & 1) != 0;
             bool stationary = (flags & 2) != 0;
 
-            var vel    = Vector3.zero;
-            var angVel = Vector3.zero;
             if (!sleeping)
             {
-                reader.ReadValueSafe(out float vx); reader.ReadValueSafe(out float vy); reader.ReadValueSafe(out float vz);
-                reader.ReadValueSafe(out float ax); reader.ReadValueSafe(out float ay); reader.ReadValueSafe(out float az);
-                vel    = new Vector3(vx, vy, vz);
-                angVel = new Vector3(ax, ay, az);
+                // Velocity data is in the packet (protocol unchanged) — read to advance the
+                // buffer, but discard. All client balls are kinematic; MovePosition drives them.
+                reader.ReadValueSafe(out float _vx); reader.ReadValueSafe(out float _vy); reader.ReadValueSafe(out float _vz);
+                reader.ReadValueSafe(out float _ax); reader.ReadValueSafe(out float _ay); reader.ReadValueSafe(out float _az);
             }
 
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
@@ -504,47 +495,37 @@ public class PieceSyncManager : NetworkBehaviour
             // Applying the 20 Hz delta would fight against the smooth parent-child update.
             if (_clientAttached.Contains(id)) continue;
 
-            // Server is holding this ball.
-            if (stationary)
+            // Server is holding this ball. All balls should already be kinematic from
+            // registration, but re-assert here in case this delta arrives before MSG_REG.
+            // Fall through to position update so the ball tracks the robot at 50 Hz.
+            if (stationary && piece.rb != null && !piece.rb.isKinematic)
             {
-                // Make kinematic immediately so gravity doesn't pull the ball away from
-                // the host-authoritative position while MSG_ATTACH (reliable) is in flight.
-                // We do NOT auto-attach here — auto-attach via FindNearestBuildNode can pick
-                // the wrong robot's node when both robots are within 2 m. MSG_ATTACH carries
-                // the explicit slot+nodeIdx and is the only correct path for parenting.
-                // Until MSG_ATTACH arrives the ball tracks the host position kinematically
-                // at 50 Hz via the fall-through position update below.
-                if (piece.rb != null && !piece.rb.isKinematic)
-                {
-                    piece.rb.isKinematic   = true;
-                    piece.rb.interpolation = RigidbodyInterpolation.None;
-                }
-                // Fall through to position update so the ball tracks the robot at 50 Hz.
+                piece.rb.isKinematic   = true;
+                piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
             }
 
             var pos = new Vector3(px, py, pz);
             var rot = new Quaternion(rx, ry, rz, rw);
 
-            if (piece.rb.isKinematic)
+            if (sleeping)
             {
-                // Kinematic ball: update both transform and physics position.
-                // transform.SetPositionAndRotation is needed for immediate visual correctness
-                // because kinematic rb.position only takes effect at the next physics step.
-                piece.transform.SetPositionAndRotation(pos, rot);
+                // Sleeping ball: teleport directly to the authoritative rest position.
+                // No interpolation needed — a sleeping ball isn't moving so there's nothing
+                // to interpolate between, and exact placement matters for stacked balls.
                 piece.rb.position = pos;
                 piece.rb.rotation = rot;
+                piece.transform.SetPositionAndRotation(pos, rot);
             }
             else
             {
-                // Dynamic shot ball: snap physics to the authoritative server position.
-                // Do NOT touch transform directly — for dynamic RBs, the physics engine
-                // owns the transform and direct assignment breaks physics integration.
-                piece.rb.position = pos;
-                piece.rb.rotation = rot;
+                // Moving ball: queue the move for the next FixedUpdate. With Interpolate
+                // enabled, Unity smoothly renders the transition between the previous physics
+                // position and the new one — no visible snap even at 50 Hz delta rate.
+                // velocity/angVel are still in the packet (protocol unchanged) but are not
+                // applied — all balls on the client are kinematic and driven by MovePosition.
+                piece.rb.MovePosition(pos);
+                piece.rb.MoveRotation(rot);
             }
-
-            piece.rb.velocity        = vel;      // no-op for kinematic; applied for dynamic
-            piece.rb.angularVelocity = angVel;
         }
     }
 
