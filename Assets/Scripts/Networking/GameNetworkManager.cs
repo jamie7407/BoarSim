@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
@@ -66,6 +67,13 @@ public class GameNetworkManager : NetworkBehaviour
     // event.  AccumulateClientTriggeredInputs() runs every Update to capture these events and
     // ORs them into the next mech send so no tap is ever missed.
     private readonly ulong[] _pendingClientTriggeredMask = new ulong[4];
+
+    // Buffered MovePosition targets for kinematic robot Rigidbodies on the client.
+    // OnJointSyncReceived (NGO EarlyUpdate) populates this; FixedUpdate consumes it.
+    // Buffering ensures exactly one MovePosition per physics step regardless of how many
+    // sync packets arrive per EarlyUpdate — prevents velocity amplification that caused
+    // ball-pile explosions when multiple packets were batched before one FixedUpdate.
+    private readonly Dictionary<Rigidbody, (Vector3 pos, Quaternion rot)> _kinematicTargets = new();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -262,7 +270,10 @@ public class GameNetworkManager : NetworkBehaviour
 
             // Host is authoritative for ALL robot physics. Make every root Rigidbody
             // kinematic so MSG_JOINT_SYNC drives it via MovePosition (sweep, not teleport).
-            // Interpolate lets the visual track smoothly between physics steps.
+            // Use None interpolation — Interpolate writes transform.position every Update
+            // frame, and Physics.autoSyncTransforms=1 immediately syncs that to rb.position,
+            // corrupting the starting point of the next MovePosition sweep and causing
+            // velocity amplification that explodes ball piles.
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
@@ -270,7 +281,7 @@ public class GameNetworkManager : NetworkBehaviour
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
+                rb.interpolation = RigidbodyInterpolation.None;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -293,7 +304,7 @@ public class GameNetworkManager : NetworkBehaviour
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
+                rb.interpolation = RigidbodyInterpolation.None;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -383,6 +394,20 @@ public class GameNetworkManager : NetworkBehaviour
 
     private void FixedUpdate()
     {
+        // Client: consume buffered MovePosition targets — exactly one per physics step.
+        // EarlyUpdate (where NGO delivers packets) can batch multiple sync packets before
+        // a single FixedUpdate runs. Without buffering, only the last packet's MovePosition
+        // is applied but the sweep covers N ticks → N× velocity → pile explosion.
+        if (IsClient && !IsHost && _kinematicTargets.Count > 0)
+        {
+            foreach (var kvp in _kinematicTargets)
+            {
+                if (kvp.Key == null || !kvp.Key.isKinematic) continue;
+                KinematicMove(kvp.Key, kvp.Value.pos, kvp.Value.rot);
+            }
+            _kinematicTargets.Clear();
+        }
+
         if (!IsServer) return;
         if (++_robotSyncTick < robotSyncEveryNFixed) return;
         _robotSyncTick = 0;
@@ -424,7 +449,7 @@ public class GameNetworkManager : NetworkBehaviour
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
         if (rb != null && rb.isKinematic)
-            KinematicMove(rb, pos, rot);
+            _kinematicTargets[rb] = (pos, rot);
     }
 
     // Sweep a kinematic body to target using MovePosition (generates contacts with
@@ -454,7 +479,7 @@ public class GameNetworkManager : NetworkBehaviour
     private void SendJointSync()
     {
         // First pass: collect filtered Rigidbody lists and store root transforms.
-        var perSlot       = new System.Collections.Generic.List<Rigidbody>[4];
+        var perSlot       = new List<Rigidbody>[4];
         var slotTransform = new Transform[4];
         int totalBytes = 0;
         for (int slot = 0; slot < 4; slot++)
@@ -463,7 +488,7 @@ public class GameNetworkManager : NetworkBehaviour
             if (robot == null) continue;
             slotTransform[slot] = robot.transform;
             var rootRb = robot.GetComponent<Rigidbody>();
-            var buf = new System.Collections.Generic.List<Rigidbody>();
+            var buf = new List<Rigidbody>();
             foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
             {
                 if (rb == rootRb) continue;
@@ -533,12 +558,12 @@ public class GameNetworkManager : NetworkBehaviour
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // MovePosition sweeps the kinematic body, generating contacts with dynamic
-            // balls along the path. For large jumps (robot loading from spawn, respawning)
-            // use rb.position= instead — sweeping 5+ metres at once would appear to PhysX
-            // as a 250 m/s collision and launch every ball on the field.
+            // Buffer the target for FixedUpdate — do not call MovePosition here (EarlyUpdate).
+            // Calling it from EarlyUpdate means multiple packets batched before one FixedUpdate
+            // each overwrite the target; only the last survives, but the sweep covers N ticks
+            // of displacement in 1 step → N× implied velocity → ball-pile explosion.
             if (rootRb != null)
-                KinematicMove(rootRb, rootPos, rootRot);
+                _kinematicTargets[rootRb] = (rootPos, rootRot);
 
             // Build filtered joint list on the fly every packet.
             // Making RBs kinematic inline means correctness doesn't depend on
@@ -548,7 +573,7 @@ public class GameNetworkManager : NetworkBehaviour
             if (robot != null)
             {
                 var allRbs = robot.GetComponentsInChildren<Rigidbody>();
-                var fbuf = new System.Collections.Generic.List<Rigidbody>(allRbs.Length);
+                var fbuf = new List<Rigidbody>(allRbs.Length);
                 foreach (var rb in allRbs)
                 {
                     if (rb == rootRb) continue;
@@ -558,7 +583,7 @@ public class GameNetworkManager : NetworkBehaviour
                     if (!rb.isKinematic)
                     {
                         rb.isKinematic = true;
-                        rb.interpolation = RigidbodyInterpolation.Interpolate;
+                        rb.interpolation = RigidbodyInterpolation.None;
                         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                     }
                     fbuf.Add(rb);
@@ -582,7 +607,7 @@ public class GameNetworkManager : NetworkBehaviour
 
                 var worldPos = new Vector3(px, py, pz);
                 var worldRot = new Quaternion(qx, qy, qz, qw);
-                KinematicMove(rb, worldPos, worldRot);
+                _kinematicTargets[rb] = (worldPos, worldRot);
             }
         }
     }

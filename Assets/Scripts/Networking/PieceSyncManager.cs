@@ -477,48 +477,19 @@ public class PieceSyncManager : NetworkBehaviour
             // Server is holding this ball.
             if (stationary)
             {
-                // Ensure kinematic immediately — gravity must not pull a dynamic ball
-                // through robot colliders while we attempt the node parent below.
+                // Make kinematic immediately so gravity doesn't pull the ball away from
+                // the host-authoritative position while MSG_ATTACH (reliable) is in flight.
+                // We do NOT auto-attach here — auto-attach via FindNearestBuildNode can pick
+                // the wrong robot's node when both robots are within 2 m. MSG_ATTACH carries
+                // the explicit slot+nodeIdx and is the only correct path for parenting.
+                // Until MSG_ATTACH arrives the ball tracks the host position kinematically
+                // at 50 Hz via the fall-through position update below.
                 if (piece.rb != null && !piece.rb.isKinematic)
                 {
                     piece.rb.isKinematic   = true;
                     piece.rb.interpolation = RigidbodyInterpolation.None;
                 }
-
-                // Auto-attach: parent directly to the nearest BuildNode using the exact
-                // host-physics position reported in this delta packet. This fires from the
-                // unreliable-sequenced channel — always faster than MSG_ATTACH (reliable) —
-                // closing the window where an unparented kinematic ball can slide or fall
-                // through robot geometry before MSG_ATTACH arrives.
-                var nearNode = FindNearestBuildNode(new Vector3(px, py, pz), 2f);
-                if (nearNode != null)
-                {
-                    // Clear stale reference from any previous node so its stowing
-                    // maintenance doesn't fight with the new attachment.
-                    var prevNode = piece.transform.parent?.GetComponent<BuildNode>();
-                    if (prevNode != null && prevNode != nearNode && prevNode.currentGamePiece == piece)
-                        prevNode.currentGamePiece = null;
-
-                    if (piece.colliderParent != null) piece.colliderParent.SetActive(false);
-                    piece.transform.SetParent(nearNode.transform, false);
-                    piece.transform.localPosition = Vector3.zero;
-                    piece.transform.localRotation = Quaternion.identity;
-                    if (piece.rb != null)
-                    {
-                        piece.rb.position = piece.transform.position;
-                        piece.rb.rotation = piece.transform.rotation;
-                    }
-                    piece.owner               = nearNode.transform;
-                    piece.state               = GamePieceState.Stationary;
-                    nearNode.currentGamePiece = piece;
-                    nearNode.currentState     = NodeState.Stowing;
-                    _clientAttached.Add(id);
-                    Debug.Log($"[Net][Client] Ball {id} auto-attached via delta (nearest node {nearNode.name})");
-                    continue; // Now tracked by node parenting; skip position update
-                }
-                Debug.LogWarning($"[Net][Client] Ball {id} stationary delta but no node within 2m of ({px:F1},{py:F1},{pz:F1}). cachedNodes={_cachedNodes?.Length ?? 0}");
-                // No node found yet (robots still loading) — fall through so the ball is
-                // placed kinematically at the host position. Retries on next delta tick.
+                // Fall through to position update so the ball tracks the robot at 50 Hz.
             }
 
             var pos = new Vector3(px, py, pz);
