@@ -70,6 +70,11 @@ public class PieceSyncManager : NetworkBehaviour
     // manually depenetrate dynamic field balls in FixedUpdate instead.
     private Collider[] _cachedRobotColliders = System.Array.Empty<Collider>();
     private float      _robotColCacheTime = -99f;
+    // Dead-reckoning state: last authoritative position + velocity received from server.
+    // Used in client FixedUpdate to extrapolate ball positions between 20 Hz server updates.
+    private readonly Dictionary<ushort, Vector3> _recvPos  = new();
+    private readonly Dictionary<ushort, Vector3> _recvVel  = new();
+    private readonly Dictionary<ushort, float>   _recvTime = new();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -258,6 +263,26 @@ public class PieceSyncManager : NetworkBehaviour
             ap.rb.rotation = ap.transform.rotation;
         }
 
+        // Dead-reckoning: extrapolate each moving ball forward using its last known velocity.
+        // Called every FixedUpdate (50 Hz) so balls move continuously between 20 Hz server
+        // updates. Without this, kinematic MovePosition only moves the ball once then holds it
+        // still for ~50ms until the next delta arrives — visually choppy at any ball speed.
+        // Capped at 0.15 s to avoid large errors when packets are late or lost.
+        foreach (var kvp in _recvPos)
+        {
+            var id = kvp.Key;
+            if (!_recvTime.TryGetValue(id, out float t0)) continue;
+            float dt = Time.fixedTime - t0;
+            if (dt <= 0f || dt > 0.15f) continue;
+
+            if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null) continue;
+            if (_clientAttached.Contains(id)) continue;
+
+            var vel = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
+            var projected = kvp.Value + vel * dt + 0.5f * Physics.gravity * dt * dt;
+            piece.rb.MovePosition(projected);
+        }
+
         // Ball-robot collision is now handled by Rigidbody.MovePosition in GameNetworkManager:
         // kinematic joints sweep to their target each FixedUpdate, generating contacts with
         // dynamic balls natively. ClientManualBallPush is no longer called.
@@ -323,6 +348,10 @@ public class PieceSyncManager : NetworkBehaviour
             }
             else if (!isStationary && wasStationary) SendPieceDetach(id, piece);
             _lastPieceState[id] = piece.state;
+
+            // Stationary balls are parented to robot nodes via MSG_ATTACH on the client.
+            // Parent-child transform already tracks the robot at 60 fps — no delta needed.
+            if (isStationary) continue;
 
             bool sleeping = !isStationary && piece.rb.IsSleeping();
 
@@ -493,12 +522,12 @@ public class PieceSyncManager : NetworkBehaviour
             bool sleeping   = (flags & 1) != 0;
             bool stationary = (flags & 2) != 0;
 
+            Vector3 vel = Vector3.zero;
             if (!sleeping)
             {
-                // Velocity data is in the packet (protocol unchanged) — read to advance the
-                // buffer, but discard. All client balls are kinematic; MovePosition drives them.
-                reader.ReadValueSafe(out float _vx); reader.ReadValueSafe(out float _vy); reader.ReadValueSafe(out float _vz);
+                reader.ReadValueSafe(out float vx); reader.ReadValueSafe(out float vy); reader.ReadValueSafe(out float vz);
                 reader.ReadValueSafe(out float _ax); reader.ReadValueSafe(out float _ay); reader.ReadValueSafe(out float _az);
+                vel = new Vector3(vx, vy, vz);
             }
 
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
@@ -508,9 +537,7 @@ public class PieceSyncManager : NetworkBehaviour
             // Applying the 20 Hz delta would fight against the smooth parent-child update.
             if (_clientAttached.Contains(id)) continue;
 
-            // Server is holding this ball. All balls should already be kinematic from
-            // registration, but re-assert here in case this delta arrives before MSG_REG.
-            // Fall through to position update so the ball tracks the robot at 50 Hz.
+            // Re-assert kinematic in case this delta arrives before MSG_REG.
             if (stationary && piece.rb != null && !piece.rb.isKinematic)
             {
                 piece.rb.isKinematic   = true;
@@ -522,20 +549,22 @@ public class PieceSyncManager : NetworkBehaviour
 
             if (sleeping)
             {
-                // Sleeping ball: teleport directly to the authoritative rest position.
-                // No interpolation needed — a sleeping ball isn't moving so there's nothing
-                // to interpolate between, and exact placement matters for stacked balls.
+                // Sleeping ball: teleport to authoritative rest position and clear dead-reckoning.
                 piece.rb.position = pos;
                 piece.rb.rotation = rot;
                 piece.transform.SetPositionAndRotation(pos, rot);
+                _recvPos.Remove(id);
+                _recvVel.Remove(id);
+                _recvTime.Remove(id);
             }
             else
             {
-                // Moving ball: queue the move for the next FixedUpdate. With Interpolate
-                // enabled, Unity smoothly renders the transition between the previous physics
-                // position and the new one — no visible snap even at 50 Hz delta rate.
-                // velocity/angVel are still in the packet (protocol unchanged) but are not
-                // applied — all balls on the client are kinematic and driven by MovePosition.
+                // Moving ball: store authoritative state for dead-reckoning in FixedUpdate.
+                // FixedUpdate will extrapolate pos + vel * dt + gravity * dt² each tick so
+                // the ball moves continuously between 20 Hz server updates instead of snapping.
+                _recvPos[id]  = pos;
+                _recvVel[id]  = vel;
+                _recvTime[id] = Time.fixedTime;
                 piece.rb.MovePosition(pos);
                 piece.rb.MoveRotation(rot);
             }
