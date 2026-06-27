@@ -50,6 +50,9 @@ public class PieceSyncManager : NetworkBehaviour
     // Tracks last-known piece state per ID to detect hold/release transitions.
     private readonly Dictionary<ushort, GamePieceState> _lastPieceState = new();
     private int _fixedTick;
+    // Rotating start index for delta sends: we process at most kMaxPacketsPerDelta UDP packets
+    // per tick, then resume from this ball next tick. All 472 balls are covered in ~6 ticks.
+    private int _deltaStartIndex;
 
     // Client-side state
     private readonly Dictionary<ushort, GamePiece> _clientMap = new();
@@ -282,15 +285,26 @@ public class PieceSyncManager : NetworkBehaviour
 
         if (_serverPieces.Length == 0) return;
 
-        // Each MSG_DELTA packet's payload is capped at kMaxPayload bytes so it fits within
-        // NGO's ~1400-byte MTU. Entries are variable-size: sleeping=31 bytes, active=55 bytes.
-        // We flush the current writer and start a fresh one whenever the next entry won't fit.
-        // The client reads entries until the buffer is exhausted, so each packet is self-contained.
-        const int kMaxPayload = 1100;
+        // Each packet's payload is capped at kMaxPayload bytes (NGO MTU limit).
+        // To prevent the Unity Transport receive queue (128 packets) from overflowing at
+        // match startup (472 active balls = 24 packets/tick × 50 Hz = 1200/s), we cap the
+        // total packets sent per tick at kMaxPacketsPerDelta and rotate _deltaStartIndex so
+        // every ball is eventually covered. At 4 packets/tick × 50 Hz = 200 packets/sec max,
+        // all 472 balls are covered in ~6 ticks (120 ms) during the initial settling period.
+        // After settling, most balls sleep and the actual packet count drops to 0-2/tick.
+        const int kMaxPayload       = 1100;
+        const int kMaxPacketsPerDelta = 4;
+
+        int  n            = _serverPieces.Length;
+        int  packetsSent  = 0;
+        bool limitReached = false;
+
         var writer = new FastBufferWriter(kMaxPayload, Allocator.Temp);
 
-        for (int i = 0; i < _serverPieces.Length; i++)
+        for (int j = 0; j < n; j++)
         {
+            int i = (_deltaStartIndex + j) % n;
+
             var piece = _serverPieces[i];
             if (piece == null || piece.rb == null) continue;
             if (!_serverIds.TryGetValue(piece, out ushort id)) continue;
@@ -298,10 +312,8 @@ public class PieceSyncManager : NetworkBehaviour
             bool isStationary = piece.state == GamePieceState.Stationary;
 
             // Detect hold/release transitions and notify clients so they can parent or
-            // un-parent the ball, giving smooth 60 fps tracking instead of 20 Hz snaps.
-            // If the piece isn't in _lastPieceState yet (first delta tick after connection
-            // or after a new match) treat it as "was not stationary" so preloaded balls that
-            // are already held get their MSG_ATTACH on the first tick.
+            // un-parent the ball. State detection runs for every ball regardless of the
+            // packet limit — MSG_ATTACH/DETACH are reliable and not subject to the cap.
             bool wasStationary = _lastPieceState.TryGetValue(id, out var prevState) &&
                                  prevState == GamePieceState.Stationary;
             if (isStationary && !wasStationary)
@@ -312,46 +324,45 @@ public class PieceSyncManager : NetworkBehaviour
             else if (!isStationary && wasStationary) SendPieceDetach(id, piece);
             _lastPieceState[id] = piece.state;
 
-            // Stationary pieces (held by robot) are no longer skipped — they need to be
-            // synced so the other screen sees the pickup. They are sent as "sleeping"
-            // (no velocity data) since they move with the robot, not independently.
             bool sleeping = !isStationary && piece.rb.IsSleeping();
 
-            // Skip pieces whose position/rotation hasn't changed: sleeping world pieces
-            // and stationary pieces on a non-moving robot both qualify.
             bool posUnchanged =
                 _lastSentPos.TryGetValue(id, out var lp) &&
                 _lastSentRot.TryGetValue(id, out var lr) &&
                 (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
-            // Stationary (held) pieces are always re-sent even when position is unchanged:
-            // MSG_DELTA is unreliable, so the single "ball entered hopper" packet may be
-            // dropped, and the client would never get corrected if we skip on posUnchanged.
-            // Sleeping world pieces (not held) are still skipped — they don't move.
             if (posUnchanged && sleeping) continue;
 
             var pos = piece.rb.position;
             var rot = piece.rb.rotation;
-            _lastSentPos[id] = pos;
-            _lastSentRot[id] = rot;
 
-            // bit 0 = sleeping, bit 1 = stationary (held by robot on server).
-            // The stationary bit lets the client make the ball kinematic immediately
-            // from the delta, before MSG_ATTACH arrives — preventing gravity from
-            // pulling a dynamic ball through the robot's kinematic colliders.
             byte flags = 0;
             if (sleeping)     flags |= 1;
             if (isStationary) flags |= 2;
 
-            // Flush the current packet and start a new one if this entry won't fit.
             int entrySize = sleeping ? 31 : 55;
+
+            // Flush and enforce the per-tick packet cap.
             if (writer.Position > 0 && writer.Position + entrySize > kMaxPayload)
             {
                 NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
                 writer.Dispose();
                 writer = new FastBufferWriter(kMaxPayload, Allocator.Temp);
+                packetsSent++;
+
+                if (packetsSent >= kMaxPacketsPerDelta)
+                {
+                    // Resume from this ball next tick; skip writing it to the new writer.
+                    _deltaStartIndex = i;
+                    limitReached = true;
+                    break;
+                }
             }
+
+            // Record and write the ball only if we're still within the packet budget.
+            _lastSentPos[id] = pos;
+            _lastSentRot[id] = rot;
 
             writer.WriteValueSafe(id);
             writer.WriteValueSafe(pos.x); writer.WriteValueSafe(pos.y); writer.WriteValueSafe(pos.z);
@@ -366,6 +377,8 @@ public class PieceSyncManager : NetworkBehaviour
                 writer.WriteValueSafe(angVel.x); writer.WriteValueSafe(angVel.y); writer.WriteValueSafe(angVel.z);
             }
         }
+
+        if (!limitReached) _deltaStartIndex = 0; // completed a full pass; restart next tick
 
         if (writer.Position > 0)
             NetworkManager.CustomMessagingManager.SendNamedMessageToAll(MSG_DELTA, writer, NetworkDelivery.UnreliableSequenced);
