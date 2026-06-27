@@ -86,6 +86,7 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_ATTACH, OnPieceAttachReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DETACH, OnPieceDetachReceived);
+            Debug.Log("[Net][Client] PieceSyncManager spawned — message handlers registered");
         }
     }
 
@@ -124,8 +125,11 @@ public class PieceSyncManager : NetworkBehaviour
         while (IsServer)
         {
             RefreshServerPieces();
-            if (NetworkManager.ConnectedClientsList.Count > 1)
+            int clientCount = NetworkManager.ConnectedClientsList.Count;
+            Debug.Log($"[Net][Host] RegistrationLoop tick: {_serverPieces.Length} pieces, {clientCount} clients");
+            if (clientCount > 1)
             {
+                Debug.Log($"[Net][Host] Sending registration to {clientCount - 1} client(s)");
                 SendRegistration();
                 SendDeletions();
                 // Re-send attach messages for all currently-held balls so that a client
