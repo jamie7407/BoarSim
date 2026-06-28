@@ -263,31 +263,40 @@ public class PieceSyncManager : NetworkBehaviour
             ap.rb.rotation = ap.transform.rotation;
         }
 
-        // Dead-reckoning: extrapolate each moving ball forward using its last known velocity.
-        // Called every FixedUpdate (50 Hz) so balls move continuously between 20 Hz server
-        // updates. Without this, kinematic MovePosition only moves the ball once then holds it
-        // still for ~50ms until the next delta arrives — visually choppy at any ball speed.
+        // Per-ball position update: called every FixedUpdate (50 Hz) so kinematic balls move
+        // continuously between 20 Hz server updates instead of freezing between packets.
         //
-        // No gravity term: the server velocity already reflects the current trajectory including
-        // gravity on the host. Adding gravity again here causes floor-rolling balls (vy≈0) to
-        // sink through the map geometry within 100ms. Linear extrapolation is accurate to within
-        // a few cm over one 50ms sync window and avoids all floor-penetration artefacts.
-        //
-        // Cap at 80ms (4 FixedUpdate ticks). Beyond that, error from unmodelled collisions
-        // accumulates faster than it's corrected, causing visible rubber-banding.
+        // Hybrid strategy based on ball speed:
+        //   Fast (>1 m/s): dead-reckon with linear extrapolation. Corrections are 80% blended
+        //     on receive so mis-predicted overshoots don't snap the ball back.
+        //   Slow (≤1 m/s): smooth lerp toward the last server position. Settling/rolling balls
+        //     change direction too unpredictably for extrapolation — without this they oscillate
+        //     as each server correction fights the overshoot from the previous extrapolation,
+        //     getting visibly worse as more balls settle to rest over the match.
         foreach (var kvp in _recvPos)
         {
             var id = kvp.Key;
-            if (!_recvTime.TryGetValue(id, out float t0)) continue;
-            float dt = Time.fixedTime - t0;
-            if (dt <= 0f || dt > 0.08f) continue;
-
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null) continue;
             if (_clientAttached.Contains(id)) continue;
 
-            var vel = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
-            var projected = kvp.Value + vel * dt;
-            piece.rb.MovePosition(projected);
+            var vel   = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
+            float spd = vel.magnitude;
+
+            Vector3 target;
+            if (spd > 1f && _recvTime.TryGetValue(id, out float t0))
+            {
+                float dt = Time.fixedTime - t0;
+                target = dt < 0.08f ? kvp.Value + vel * dt : kvp.Value;
+            }
+            else
+            {
+                // Lerp smoothly toward the server position each tick (convergence ~10 Hz).
+                // This looks smooth because MovePosition is called every FixedUpdate, giving
+                // Interpolate mode consistent "from/to" positions to render between.
+                target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
+            }
+
+            piece.rb.MovePosition(target);
         }
 
         // Ball-robot collision is now handled by Rigidbody.MovePosition in GameNetworkManager:
@@ -566,13 +575,29 @@ public class PieceSyncManager : NetworkBehaviour
             }
             else
             {
-                // Moving ball: store authoritative state for dead-reckoning in FixedUpdate.
-                // FixedUpdate will extrapolate pos + vel * dt + gravity * dt² each tick so
-                // the ball moves continuously between 20 Hz server updates instead of snapping.
-                _recvPos[id]  = pos;
+                // Fast balls: blend the server correction with the current dead-reckoned estimate
+                // so a mis-predicted extrapolation doesn't snap the ball back visibly.
+                // Slow balls skip blending — they go straight to server pos (no extrapolation).
+                float speed = vel.magnitude;
+                Vector3 storedPos;
+                if (speed > 1f
+                    && _recvPos.TryGetValue(id, out var lastPos)
+                    && _recvTime.TryGetValue(id, out float lastT))
+                {
+                    var lastVel   = _recvVel.TryGetValue(id, out var lv) ? lv : Vector3.zero;
+                    float elapsed = Time.fixedTime - lastT;
+                    var estimated = elapsed < 0.08f ? lastPos + lastVel * elapsed : lastPos;
+                    // 80% server truth, 20% local estimate — damps oscillation without lag
+                    storedPos = Vector3.Lerp(estimated, pos, 0.8f);
+                }
+                else
+                {
+                    storedPos = pos;
+                }
+                _recvPos[id]  = storedPos;
                 _recvVel[id]  = vel;
                 _recvTime[id] = Time.fixedTime;
-                piece.rb.MovePosition(pos);
+                piece.rb.MovePosition(storedPos);
                 piece.rb.MoveRotation(rot);
             }
         }
