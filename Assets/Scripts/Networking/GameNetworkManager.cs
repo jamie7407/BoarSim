@@ -321,8 +321,9 @@ using PlayMode = Util.PlayMode;
 
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
-            // Own robot's children are skipped — swerve modules must remain dynamic so
-            // SwerveController can apply wheel forces and drive the root locally.
+            // Own robot's module RBs also go kinematic — ModuleBehaviour applies forces directly
+            // to the root _rb (not via joints), so modules only need to follow the root via the
+            // transform hierarchy and detect ground contacts via WheelBehaviour.
             MakeChildRigidbodiesKinematic();
 
             // Remote robots: make root kinematic so MSG_JOINT_SYNC drives via rb.position=.
@@ -342,14 +343,13 @@ using PlayMode = Util.PlayMode;
     }
 
     // Makes every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
-    // Own robot slot is skipped — swerve module RBs must remain dynamic so wheel forces
-    // can drive the root Rigidbody for client-side prediction.
+    // ModuleBehaviour applies forces directly to the root _rb, so wheel module RBs do not
+    // need to be dynamic — they stay kinematic and follow the root via the transform hierarchy.
     // GamePiece RBs are excluded — they're handled by PieceSyncManager.
     private void MakeChildRigidbodiesKinematic()
     {
         for (int slot = 0; slot < 4; slot++)
         {
-            if (slot == LocalClientSlot) continue;
             var robot = _loadMatch.GetRobotLoaded(slot);
             if (robot == null) continue;
             var rootRb = robot.GetComponent<Rigidbody>();
