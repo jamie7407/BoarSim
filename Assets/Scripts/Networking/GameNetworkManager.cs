@@ -321,22 +321,20 @@ using PlayMode = Util.PlayMode;
 
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
+            // Own robot's children are skipped — swerve modules must remain dynamic so
+            // SwerveController can apply wheel forces and drive the root locally.
             MakeChildRigidbodiesKinematic();
 
-            // Host is authoritative for ALL robot physics. Make every root Rigidbody
-            // kinematic so MSG_JOINT_SYNC drives it via rb.position= (teleport).
-            // Use None interpolation to prevent transform.position writes from fighting
-            // the physics position we set each FixedUpdate.
+            // Remote robots: make root kinematic so MSG_JOINT_SYNC drives via rb.position=.
+            // Own robot: keep root dynamic for client-side prediction — SwerveController reads
+            // local PlayerInput directly (SetNetworkDrive is never called on the client copy).
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
                 if (robot == null) continue;
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
-                rb.isKinematic = true;
-                // Interpolate smooths the visual between 50 Hz physics steps on high-refresh
-                // displays. Safe with rb.position= in FixedUpdate because we never write
-                // transform.position directly outside FixedUpdate.
+                rb.isKinematic = slot != LocalClientSlot;
                 rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
@@ -344,14 +342,14 @@ using PlayMode = Util.PlayMode;
     }
 
     // Makes every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
-    // Called from ApplyRoleToLoadedMatch as early as possible so joints are ready before
-    // the first joint-sync packet arrives. OnJointSyncReceived also sets kinematic inline
-    // as a belt-and-suspenders in case this runs after the first packets.
+    // Own robot slot is skipped — swerve module RBs must remain dynamic so wheel forces
+    // can drive the root Rigidbody for client-side prediction.
     // GamePiece RBs are excluded — they're handled by PieceSyncManager.
     private void MakeChildRigidbodiesKinematic()
     {
         for (int slot = 0; slot < 4; slot++)
         {
+            if (slot == LocalClientSlot) continue;
             var robot = _loadMatch.GetRobotLoaded(slot);
             if (robot == null) continue;
             var rootRb = robot.GetComponent<Rigidbody>();
@@ -552,6 +550,8 @@ using PlayMode = Util.PlayMode;
     // Client: receive joint positions from host and apply to kinematic joint Rigidbodies.
     // Each slot packet includes the root world pos/rot sent in the same host FixedUpdate,
     // so the client uses exactly that root — no dependency on separately-timed root sync.
+    // Own robot slot (LocalClientSlot) is handled for client-side prediction: joint data is
+    // read and discarded; root is only snapped if divergence exceeds 2m (gross desync).
     private void OnJointSyncReceived(ulong senderId, FastBufferReader reader)
     {
         if (_loadMatch == null) return;
@@ -568,13 +568,37 @@ using PlayMode = Util.PlayMode;
 
             reader.ReadValueSafe(out byte jointCount);
 
+            bool isOwnRobot = LocalClientSlot >= 0 && slot == (byte)LocalClientSlot;
             var robot  = _loadMatch.GetRobotLoaded(slot);
             var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
 
-            // Buffer the target for FixedUpdate — do not call MovePosition here (EarlyUpdate).
-            // Calling it from EarlyUpdate means multiple packets batched before one FixedUpdate
-            // each overwrite the target; only the last survives, but the sweep covers N ticks
-            // of displacement in 1 step → N× implied velocity → ball-pile explosion.
+            if (isOwnRobot)
+            {
+                // Client-side prediction: own robot drives entirely from local physics.
+                // Only hard-snap the root if it has drifted more than 2m from the host's
+                // authoritative position (e.g. collision pushed us out of sync).
+                if (rootRb != null && Vector3.Distance(rootRb.position, rootPos) > 2f)
+                {
+                    rootRb.position = rootPos;
+                    rootRb.rotation = rootRot;
+                    rootRb.velocity = Vector3.zero;
+                    rootRb.angularVelocity = Vector3.zero;
+                }
+
+                // Read joint bytes to keep the buffer position correct, but discard them —
+                // own robot's swerve modules run locally and don't need host positions.
+                for (int j = 0; j < jointCount; j++)
+                {
+                    reader.ReadValueSafe(out ushort junk0); reader.ReadValueSafe(out ushort junk1); reader.ReadValueSafe(out ushort junk2);
+                    reader.ReadValueSafe(out ushort junk3); reader.ReadValueSafe(out ushort junk4); reader.ReadValueSafe(out ushort junk5); reader.ReadValueSafe(out ushort junk6);
+                }
+                continue;
+            }
+
+            // Remote robot: buffer the root target for FixedUpdate — do not call MovePosition
+            // here (EarlyUpdate). Multiple packets batched before one FixedUpdate each overwrite
+            // the target; only the last survives, but the sweep covers N ticks of displacement
+            // in 1 step → N× implied velocity → ball-pile explosion.
             if (rootRb != null)
                 _kinematicTargets[rootRb] = (rootPos, rootRot);
 
