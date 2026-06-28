@@ -89,12 +89,24 @@ public class PieceSyncManager : NetworkBehaviour
 
         if (IsClient && !IsServer)
         {
+            // Make ALL balls kinematic immediately — before registration maps them to IDs.
+            // Without this, 460+ dynamic Rigidbodies run full local physics from the moment
+            // the client joins, tanking FPS, starving the network thread, and making balls
+            // explode when they contact the kinematic robot. Registration only maps IDs;
+            // kinematic state must be set before the first FixedUpdate.
+            foreach (var piece in FindObjectsOfType<GamePiece>())
+            {
+                if (piece.rb == null) continue;
+                piece.rb.isKinematic   = true;
+                piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
+            }
+            Debug.Log($"[Net][Client] PieceSyncManager spawned — made {FindObjectsOfType<GamePiece>().Length} balls kinematic");
+
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,    OnRegistrationReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELTA,  OnDeltaReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_ATTACH, OnPieceAttachReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DETACH, OnPieceDetachReceived);
-            Debug.Log("[Net][Client] PieceSyncManager spawned — message handlers registered");
         }
     }
 

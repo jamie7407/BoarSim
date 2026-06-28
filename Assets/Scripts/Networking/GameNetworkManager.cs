@@ -75,6 +75,12 @@ public class GameNetworkManager : NetworkBehaviour
     // ball-pile explosions when multiple packets were batched before one FixedUpdate.
     private readonly Dictionary<Rigidbody, (Vector3 pos, Quaternion rot)> _kinematicTargets = new();
 
+    // Cached filtered joint RB list per robot slot. OnJointSyncReceived called 50×/sec —
+    // GetComponentsInChildren on every call was a significant CPU cost. Invalidated whenever
+    // the robot changes (SetupVersion increments on ResetField).
+    private readonly Rigidbody[][] _cachedJointRbs = new Rigidbody[4][];
+    private int _jointCacheSetupVersion = -1;
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     private void Awake() { Instance = this; }
@@ -552,30 +558,37 @@ public class GameNetworkManager : NetworkBehaviour
             if (rootRb != null)
                 _kinematicTargets[rootRb] = (rootPos, rootRot);
 
-            // Build filtered joint list on the fly every packet.
-            // Making RBs kinematic inline means correctness doesn't depend on
-            // MakeChildRigidbodiesKinematic having already run — the first packet
-            // where the robot is loaded will flip them kinematic immediately.
+            // Use cached filtered joint list — GetComponentsInChildren called 50×/sec otherwise.
+            // Cache is invalidated when SetupVersion changes (robot swapped or field reset).
+            int setupVer = _loadMatch != null ? _loadMatch.SetupVersion : -1;
+            if (setupVer != _jointCacheSetupVersion)
+            {
+                System.Array.Clear(_cachedJointRbs, 0, _cachedJointRbs.Length);
+                _jointCacheSetupVersion = setupVer;
+            }
+
             Rigidbody[] filtered;
             if (robot != null)
             {
-                var allRbs = robot.GetComponentsInChildren<Rigidbody>();
-                var fbuf = new List<Rigidbody>(allRbs.Length);
-                foreach (var rb in allRbs)
+                if (_cachedJointRbs[slot] == null)
                 {
-                    if (rb == rootRb) continue;
-                    if (rb.GetComponent<GamePiece>() != null) continue;
-                    // Flip kinematic here if MakeChildRigidbodiesKinematic hasn't fired yet.
-                    // Without this, MovePosition is ignored and physics overrides the joint.
-                    if (!rb.isKinematic)
+                    var allRbs = robot.GetComponentsInChildren<Rigidbody>();
+                    var fbuf = new List<Rigidbody>(allRbs.Length);
+                    foreach (var rb in allRbs)
                     {
-                        rb.isKinematic = true;
-                        rb.interpolation = RigidbodyInterpolation.None;
-                        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                        if (rb == rootRb) continue;
+                        if (rb.GetComponent<GamePiece>() != null) continue;
+                        if (!rb.isKinematic)
+                        {
+                            rb.isKinematic = true;
+                            rb.interpolation = RigidbodyInterpolation.None;
+                            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                        }
+                        fbuf.Add(rb);
                     }
-                    fbuf.Add(rb);
+                    _cachedJointRbs[slot] = fbuf.ToArray();
                 }
-                filtered = fbuf.ToArray();
+                filtered = _cachedJointRbs[slot];
             }
             else
             {
