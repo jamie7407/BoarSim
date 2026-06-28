@@ -365,8 +365,10 @@ public class PieceSyncManager : NetworkBehaviour
                 target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
             }
 
-            piece.rb.MovePosition(target);
-            if (_recvRot.TryGetValue(id, out var storedRot)) piece.rb.MoveRotation(storedRot);
+            // Direct position set instead of MovePosition — all client bodies are kinematic
+            // so there's no CCD sweep needed, and rb.position= is significantly cheaper.
+            piece.rb.position = target;
+            if (_recvRot.TryGetValue(id, out var storedRot)) piece.rb.rotation = storedRot;
         }
 
         // Ball-robot collision is now handled by Rigidbody.MovePosition in GameNetworkManager:
