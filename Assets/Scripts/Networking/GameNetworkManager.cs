@@ -95,6 +95,11 @@ using PlayMode = Util.PlayMode;
     private readonly Rigidbody[][] _cachedJointRbs = new Rigidbody[4][];
     private int _jointCacheSetupVersion = -1;
 
+    // Per-slot JointController and BuildNode caches for AccumulateClientTriggeredInputs.
+    // Built once in ApplyRoleToLoadedMatch to avoid GetComponentsInChildren every Update frame.
+    private readonly JointController[][] _cachedClientJcs = new JointController[4][];
+    private readonly BuildNode[][]       _cachedClientBns = new BuildNode[4][];
+
     // Host-side send cache: same data, rebuilt on SetupVersion change.
     // Eliminates GetComponentsInChildren calls at 50 Hz from SendJointSync.
     private readonly Rigidbody[][] _cachedSendJointRbs = new Rigidbody[4][];
@@ -235,7 +240,8 @@ using PlayMode = Util.PlayMode;
 
             int bit = 0;
 
-            foreach (var jc in robot.GetComponentsInChildren<JointController>())
+            var jcs = _cachedClientJcs[slot];
+            if (jcs != null) foreach (var jc in jcs)
             {
                 if (jc.setPoints == null) continue;
                 for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
@@ -248,13 +254,14 @@ using PlayMode = Util.PlayMode;
                 }
             }
 
-            foreach (var bn in robot.GetComponentsInChildren<BuildNode>())
+            var bns = _cachedClientBns[slot];
+            if (bns != null) foreach (var bn in bns)
             {
                 if (bn.Actions == null) continue;
                 for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
                 {
                     var act = bn.Actions[a];
-                    if (!act.InputRequired) continue; // AlwaysPerform — no trigger to capture
+                    if (!act.InputRequired) continue;
                     var ca = actionMap.FindAction(act.ControllerButton.ToString());
                     var ka = actionMap.FindAction(act.KeyboardButton.ToString());
                     bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
@@ -317,6 +324,15 @@ using PlayMode = Util.PlayMode;
             // from _netPlayMode, which may not have propagated from the host yet at this point.
             var mode = (PlayMode)_loadMatch.GetSettingsCopy().playMode;
             _loadMatch.RebindForNetworkPlay(false, mode, LocalClientSlot);
+
+            // Cache JointControllers and BuildNodes so AccumulateClientTriggeredInputs
+            // doesn't call GetComponentsInChildren every Update frame.
+            for (int s = 0; s < 4; s++)
+            {
+                var r = _loadMatch.GetRobotLoaded(s);
+                _cachedClientJcs[s] = r?.GetComponentsInChildren<JointController>();
+                _cachedClientBns[s] = r?.GetComponentsInChildren<BuildNode>();
+            }
 
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.

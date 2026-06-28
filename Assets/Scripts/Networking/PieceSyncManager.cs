@@ -312,13 +312,6 @@ public class PieceSyncManager : NetworkBehaviour
 
         if (!IsClient) return;
 
-        // Refresh robot collider cache once per second so newly loaded robots are picked up.
-        if (Time.time - _robotColCacheTime > 1f)
-        {
-            RefreshRobotColliderCache();
-            _robotColCacheTime = Time.time;
-        }
-
         // Keep rb.position in sync with transform.position for kinematic attached balls.
         // When the robot drives, the child transform moves but the physics engine's rb.position
         // would otherwise lag — stale physics position breaks collisions and the detach-to-dynamic
@@ -348,6 +341,10 @@ public class PieceSyncManager : NetworkBehaviour
 
             var vel   = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
             float spd = vel.magnitude;
+
+            // Skip settled balls — sleeping with rb already at rest position.
+            // Avoids iterating ~500 entries every FixedUpdate once balls settle.
+            if (spd < 0.01f && (piece.rb.position - kvp.Value).sqrMagnitude < 0.0001f) continue;
 
             // Dead-reckon for fast balls; lerp toward last-known position for slow ones.
             // No gravity term — balls on the ground would be pulled below the floor.
