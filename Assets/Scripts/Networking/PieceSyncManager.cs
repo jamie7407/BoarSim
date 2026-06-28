@@ -27,8 +27,8 @@ using Util;
 [RequireComponent(typeof(NetworkObject))]
 public class PieceSyncManager : NetworkBehaviour
 {
-    [Tooltip("Send piece deltas every N FixedUpdate ticks (3 ≈ 20 Hz at 50 Hz fixed rate)")]
-    [SerializeField] private int syncEveryNFixed = 3;
+    [Tooltip("Send piece deltas every N FixedUpdate ticks (1 = 50 Hz — cheap when balls are settled because posUnchanged skips non-moving balls)")]
+    [SerializeField] private int syncEveryNFixed = 1;
     [Tooltip("Re-send full registration so newly spawned pieces get mapped")]
     [SerializeField] private float registrationInterval = 5f;
 
@@ -377,7 +377,11 @@ public class PieceSyncManager : NetworkBehaviour
                 (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
-            if (posUnchanged && sleeping) continue;
+            // Skip if position is unchanged regardless of sleep state. With 460 packed balls
+            // on the field, PhysX contact forces keep most perpetually "awake" with sub-cm
+            // vibrations. Requiring sleeping=true before skipping meant ALL 460 were sent every
+            // rotation, giving each ball only a ~345ms update cycle and causing visible stutter.
+            if (posUnchanged) continue;
 
             var pos = piece.rb.position;
             var rot = piece.rb.rotation;
@@ -386,7 +390,7 @@ public class PieceSyncManager : NetworkBehaviour
             if (sleeping)     flags |= 1;
             if (isStationary) flags |= 2;
 
-            int entrySize = sleeping ? 31 : 55;
+            int entrySize = sleeping ? 31 : 43; // moving: no angVel (12 bytes saved vs old 55)
 
             // Flush and enforce the per-tick packet cap.
             if (writer.Position > 0 && writer.Position + entrySize > kMaxPayload)
@@ -416,10 +420,10 @@ public class PieceSyncManager : NetworkBehaviour
 
             if (!sleeping)
             {
-                var vel    = piece.rb.velocity;
-                var angVel = piece.rb.angularVelocity;
-                writer.WriteValueSafe(vel.x);    writer.WriteValueSafe(vel.y);    writer.WriteValueSafe(vel.z);
-                writer.WriteValueSafe(angVel.x); writer.WriteValueSafe(angVel.y); writer.WriteValueSafe(angVel.z);
+                var vel = piece.rb.velocity;
+                writer.WriteValueSafe(vel.x); writer.WriteValueSafe(vel.y); writer.WriteValueSafe(vel.z);
+                // angularVelocity omitted — client discards it and dead-reckoning uses linear vel only.
+                // Saves 12 bytes/entry: 43 bytes moving vs 55 previously → 25 balls/packet vs 20.
             }
         }
 
@@ -542,8 +546,8 @@ public class PieceSyncManager : NetworkBehaviour
             if (!sleeping)
             {
                 reader.ReadValueSafe(out float vx); reader.ReadValueSafe(out float vy); reader.ReadValueSafe(out float vz);
-                reader.ReadValueSafe(out float _ax); reader.ReadValueSafe(out float _ay); reader.ReadValueSafe(out float _az);
                 vel = new Vector3(vx, vy, vz);
+                // angularVelocity no longer in packet — removed from sender to save 12 bytes/entry.
             }
 
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null)
