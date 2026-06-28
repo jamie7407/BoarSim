@@ -59,11 +59,6 @@ public class PieceSyncManager : NetworkBehaviour
     private GamePiece[] _clientPieces = System.Array.Empty<GamePiece>();
     // IDs of balls currently parented to a robot node on client — skip delta sync for these.
     private readonly HashSet<ushort> _clientAttached = new();
-    // Time.time when each ball was released from _clientAttached. During the grace window the ball
-    // stays dynamic so local physics runs; it's only re-kinematicised after the window expires.
-    // If the ball is scored (OnDeleteReceived) before the window closes, it's destroyed silently.
-    private readonly Dictionary<ushort, float> _releaseTime = new();
-    private const float kReleaseGrace = 3f;
     // MSG_ATTACH messages buffered when robots weren't loaded yet; retried each Update.
     private readonly List<(ushort id, byte slot, byte nodeIdx, Vector3 lp, PieceNames pieceType)> _pendingAttaches = new();
     private LoadMatch _loadMatch;
@@ -296,20 +291,6 @@ public class PieceSyncManager : NetworkBehaviour
             var id = kvp.Key;
             if (!_clientMap.TryGetValue(id, out var piece) || piece == null || piece.rb == null) continue;
             if (_clientAttached.Contains(id)) continue;
-
-            // Grace period: keep local physics running after detach until either the ball is
-            // scored (destroyed via OnDeleteReceived) or the window expires.
-            if (_releaseTime.TryGetValue(id, out float releaseT))
-            {
-                if (Time.time - releaseT < kReleaseGrace) continue;
-                // Grace expired — hand back to server-driven kinematic.
-                _releaseTime.Remove(id);
-                if (piece.rb != null && !piece.rb.isKinematic)
-                {
-                    piece.rb.isKinematic   = true;
-                    piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
-                }
-            }
 
             var vel   = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
             float spd = vel.magnitude;
@@ -602,8 +583,7 @@ public class PieceSyncManager : NetworkBehaviour
             if (_clientAttached.Contains(id)) continue;
 
             // Re-assert kinematic in case this delta arrives before MSG_REG.
-            // Skip for balls in their post-release grace period — they're intentionally dynamic.
-            if (stationary && piece.rb != null && !piece.rb.isKinematic && !_releaseTime.ContainsKey(id))
+            if (stationary && piece.rb != null && !piece.rb.isKinematic)
             {
                 piece.rb.isKinematic   = true;
                 piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
@@ -614,33 +594,21 @@ public class PieceSyncManager : NetworkBehaviour
 
             if (sleeping)
             {
-                if (_releaseTime.ContainsKey(id))
+                // Sleeping ball: teleport to authoritative rest position and clear dead-reckoning.
+                // Re-assert kinematic so local physics doesn't drift it after landing
+                // (shot balls become dynamic in OnPieceDetachReceived; this re-snaps them).
+                if (!piece.rb.isKinematic)
                 {
-                    // Grace period: don't teleport — cache rest position so FixedUpdate can
-                    // snap to it once the window expires (or the ball is scored and destroyed).
-                    _recvPos[id]  = pos;
-                    _recvVel[id]  = Vector3.zero;
-                    _recvTime[id] = Time.fixedTime;
-                    _recvRot[id]  = rot;
+                    piece.rb.isKinematic   = true;
+                    piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
                 }
-                else
-                {
-                    // Sleeping ball: teleport to authoritative rest position and clear dead-reckoning.
-                    // Re-assert kinematic so local physics doesn't drift it after landing
-                    // (shot balls become dynamic in OnPieceDetachReceived; this re-snaps them).
-                    if (!piece.rb.isKinematic)
-                    {
-                        piece.rb.isKinematic   = true;
-                        piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
-                    }
-                    piece.rb.position = pos;
-                    piece.rb.rotation = rot;
-                    piece.transform.SetPositionAndRotation(pos, rot);
-                    _recvPos.Remove(id);
-                    _recvVel.Remove(id);
-                    _recvTime.Remove(id);
-                    _recvRot.Remove(id);
-                }
+                piece.rb.position = pos;
+                piece.rb.rotation = rot;
+                piece.transform.SetPositionAndRotation(pos, rot);
+                _recvPos.Remove(id);
+                _recvVel.Remove(id);
+                _recvTime.Remove(id);
+                _recvRot.Remove(id);
             }
             else
             {
@@ -1033,7 +1001,6 @@ public class PieceSyncManager : NetworkBehaviour
         if (!_clientAttached.Contains(id)) return;
 
         _clientAttached.Remove(id);
-        _releaseTime[id] = Time.time;
 
         // Mirror host ReleaseToWorld: clear owner and state before unparenting.
         var prevNode = piece.transform.parent?.GetComponent<BuildNode>();
@@ -1073,7 +1040,6 @@ public class PieceSyncManager : NetworkBehaviour
         {
             reader.ReadValueSafe(out ushort id);
             _clientAttached.Remove(id);
-            _releaseTime.Remove(id);
             if (_clientMap.TryGetValue(id, out var piece))
             {
                 _clientMap.Remove(id);
