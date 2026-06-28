@@ -430,6 +430,12 @@ public static class PostMatchStatsUI
                 : (i == 0 ? settings.robotIndex3 : settings.robotIndex4);
             names[i] = loadMatch.GetRobotNameAt(robotIndex);
         }
+        // Disambiguate when two entries share the same robot name.
+        if (count >= 2 && names[0] == names[1])
+        {
+            names[0] += " (P1)";
+            names[1] += " (P2)";
+        }
         return names;
     }
 }

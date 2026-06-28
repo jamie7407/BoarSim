@@ -273,7 +273,7 @@ public class NetworkLobbyUI : MonoBehaviour
             TextAlignmentOptions.Center, 0.1f, 0.24f, 0.9f, 0.32f,
             new Color(0.8f, 0.8f, 0.5f));
 
-        _lobbyStatus = MakeText(_lobbyRoot.transform, string.Empty, 14,
+        _lobbyStatus = MakeText(_lobbyRoot.transform, string.Empty, 16,
             TextAlignmentOptions.Center, 0.1f, 0.15f, 0.9f, 0.23f,
             new Color(0.6f, 0.6f, 0.6f));
 
@@ -333,7 +333,7 @@ public class NetworkLobbyUI : MonoBehaviour
             new Color(0.2f, 0.2f, 0.28f));
         robotPrev.onClick.AddListener(() => CycleRobot(slot, -1));
 
-        var robotLabel = MakeText(root.transform, "—", 14,
+        var robotLabel = MakeText(root.transform, "—", 18,
             TextAlignmentOptions.Center, 0.48f, 0.5f, 0.76f, 1f,
             new Color(0.9f, 0.9f, 0.9f));
 
@@ -346,7 +346,7 @@ public class NetworkLobbyUI : MonoBehaviour
             new Color(0.2f, 0.2f, 0.28f));
         spawnPrev.onClick.AddListener(() => CycleSpawn(slot, -1));
 
-        var spawnLabel = MakeText(root.transform, "—", 13,
+        var spawnLabel = MakeText(root.transform, "—", 16,
             TextAlignmentOptions.Center, 0.48f, 0f, 0.76f, 0.5f,
             new Color(0.7f, 0.7f, 0.85f));
 

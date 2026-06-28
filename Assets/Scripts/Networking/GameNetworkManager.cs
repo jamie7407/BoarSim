@@ -691,6 +691,13 @@ using PlayMode = Util.PlayMode;
 
         var left  = pi.actions.FindAction("LeftStick")?.ReadValue<Vector2>()  ?? Vector2.zero;
         var right = pi.actions.FindAction("RightStick")?.ReadValue<Vector2>() ?? Vector2.zero;
+
+        // The host's _isNetworkControlled path skips the reversed check in SwerveController,
+        // so we must apply it here before sending — mirrors the local singleplayer path.
+        var swerve = robot.GetComponent<SwerveController>();
+        if (swerve != null && swerve.reversed)
+            left = -left;
+
         SendRobotInputServerRpc(slot, left.x, left.y, right.x);
     }
 
@@ -891,14 +898,25 @@ using PlayMode = Util.PlayMode;
         else
         {
             NetworkManager.Singleton.Shutdown();
-            _loadMatch?.ResetField();
+            ResetFieldAsSingleplayer();
         }
+    }
+
+    // Resets back to singleplayer so ESC/disconnect doesn't flash splitscreen layout.
+    private void ResetFieldAsSingleplayer()
+    {
+        if (_loadMatch == null) return;
+        var s = _loadMatch.GetSettingsCopy();
+        s.playMode = PlayMode.OneVsZero;
+        _loadMatch.ApplySettings(s);
+        _loadMatch.ResetField();
     }
 
     private IEnumerator ShutdownAfterNotify()
     {
-        yield return new WaitForSecondsRealtime(0.15f);
-        _loadMatch?.ResetField();
+        // Extra time so the RPC reliably arrives before we tear down the network session.
+        yield return new WaitForSecondsRealtime(0.5f);
+        ResetFieldAsSingleplayer();
         NetworkManager.Singleton.Shutdown();
     }
 
@@ -907,7 +925,7 @@ using PlayMode = Util.PlayMode;
     {
         if (IsHost) return;
         ShowDisconnectOverlay("Host ended the game");
-        _loadMatch?.ResetField();
+        ResetFieldAsSingleplayer();
     }
 
     // Host: show a message when a remote client drops during a match, then end it.
@@ -924,7 +942,7 @@ using PlayMode = Util.PlayMode;
     private IEnumerator ResetAfterDelay(float seconds)
     {
         yield return new WaitForSecondsRealtime(seconds);
-        _loadMatch?.ResetField();
+        ResetFieldAsSingleplayer();
     }
 
     public void ShowDisconnectOverlay(string message)
@@ -983,16 +1001,16 @@ using PlayMode = Util.PlayMode;
         _countdownRunning = true;
 
         _netCountdown.Value = 3; UpdateCountdownOverlay(3);
-        yield return new WaitForSeconds(1f);
+        yield return new WaitForSecondsRealtime(1f);
         _netCountdown.Value = 2; UpdateCountdownOverlay(2);
-        yield return new WaitForSeconds(1f);
+        yield return new WaitForSecondsRealtime(1f);
         _netCountdown.Value = 1; UpdateCountdownOverlay(1);
-        yield return new WaitForSeconds(1f);
+        yield return new WaitForSecondsRealtime(1f);
 
         // Enable robots the moment GO! appears so FMS timer and start sound fire together.
         FMS.RobotState = RobotState.enabled;
         _netCountdown.Value = 0; UpdateCountdownOverlay(0);
-        yield return new WaitForSeconds(1f);
+        yield return new WaitForSecondsRealtime(1f);
 
         _netCountdown.Value = -1; UpdateCountdownOverlay(-1);
         _countdownRunning = false;
