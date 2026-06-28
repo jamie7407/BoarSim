@@ -42,7 +42,6 @@ public class NetworkLobbyUI : MonoBehaviour
 
     readonly (Util.PlayMode mode, string label, int players)[] _modes =
     {
-        (Util.PlayMode.OneVsZero, "1v0",  1),
         (Util.PlayMode.TwoVsZero, "2v0",  2),
         (Util.PlayMode.OneVsOne,  "1v1",  2),
         (Util.PlayMode.TwoVsTwo,  "2v2",  4),
@@ -80,6 +79,7 @@ public class NetworkLobbyUI : MonoBehaviour
         public GameObject   root;
         public Image        dot;
         public TextMeshProUGUI nameLabel;
+        public Image        robotIcon;
         public TextMeshProUGUI robotLabel;
         public Button       robotPrev, robotNext;
         public TextMeshProUGUI spawnLabel;
@@ -240,7 +240,7 @@ public class NetworkLobbyUI : MonoBehaviour
         MakeText(_lobbyRoot.transform, "LOBBY", 32,
             TextAlignmentOptions.Center, 0.1f, 0.88f, 0.55f, 0.97f, Color.white);
 
-        _modePrev = MakeButton(_lobbyRoot.transform, "◀", 0.57f, 0.89f, 0.63f, 0.96f,
+        _modePrev = MakeButton(_lobbyRoot.transform, "<", 0.57f, 0.89f, 0.63f, 0.96f,
             new Color(0.25f, 0.25f, 0.32f));
         _modePrev.onClick.AddListener(() => { _modeIdx = (_modeIdx - 1 + _modes.Length) % _modes.Length; SendBroadcast(); RefreshLobbyView(); });
 
@@ -248,7 +248,7 @@ public class NetworkLobbyUI : MonoBehaviour
             TextAlignmentOptions.Center, 0.64f, 0.89f, 0.81f, 0.96f,
             new Color(1f, 0.85f, 0.2f));
 
-        _modeNext = MakeButton(_lobbyRoot.transform, "▶", 0.82f, 0.89f, 0.88f, 0.96f,
+        _modeNext = MakeButton(_lobbyRoot.transform, ">", 0.82f, 0.89f, 0.88f, 0.96f,
             new Color(0.25f, 0.25f, 0.32f));
         _modeNext.onClick.AddListener(() => { _modeIdx = (_modeIdx + 1) % _modes.Length; SendBroadcast(); RefreshLobbyView(); });
 
@@ -274,7 +274,7 @@ public class NetworkLobbyUI : MonoBehaviour
             TextAlignmentOptions.Center, 0.1f, 0.15f, 0.9f, 0.23f,
             new Color(0.6f, 0.6f, 0.6f));
 
-        _startBtn = MakeButton(_lobbyRoot.transform, "▶  START MATCH",
+        _startBtn = MakeButton(_lobbyRoot.transform, "> START MATCH",
             0.1f, 0.03f, 0.58f, 0.13f, new Color(0.14f, 0.55f, 0.24f));
         _startBtn.onClick.AddListener(OnStartMatchClicked);
 
@@ -310,11 +310,23 @@ public class NetworkLobbyUI : MonoBehaviour
 
         // Slot label + username
         var nameLabel = MakeText(root.transform, label, 16,
-            TextAlignmentOptions.Left, 0.05f, 0f, 0.38f, 1f,
+            TextAlignmentOptions.Left, 0.05f, 0f, 0.30f, 1f,
             Color.white);
 
+        // Robot preview icon
+        var iconGo = new GameObject("RobotIcon", typeof(RectTransform), typeof(Image));
+        iconGo.transform.SetParent(root.transform, false);
+        var irt = iconGo.GetComponent<RectTransform>();
+        irt.anchorMin = new Vector2(0.31f, 0.05f);
+        irt.anchorMax = new Vector2(0.39f, 0.95f);
+        irt.offsetMin = irt.offsetMax = Vector2.zero;
+        var robotIcon = iconGo.GetComponent<Image>();
+        robotIcon.preserveAspect = true;
+        robotIcon.color = Color.white;
+        robotIcon.enabled = false;
+
         // Robot selector (right side, top half)
-        var robotPrev = MakeButton(root.transform, "◀", 0.40f, 0.5f, 0.47f, 1f,
+        var robotPrev = MakeButton(root.transform, "<", 0.40f, 0.5f, 0.47f, 1f,
             new Color(0.2f, 0.2f, 0.28f));
         robotPrev.onClick.AddListener(() => CycleRobot(slot, -1));
 
@@ -322,12 +334,12 @@ public class NetworkLobbyUI : MonoBehaviour
             TextAlignmentOptions.Center, 0.48f, 0.5f, 0.76f, 1f,
             new Color(0.9f, 0.9f, 0.9f));
 
-        var robotNext = MakeButton(root.transform, "▶", 0.77f, 0.5f, 0.84f, 1f,
+        var robotNext = MakeButton(root.transform, ">", 0.77f, 0.5f, 0.84f, 1f,
             new Color(0.2f, 0.2f, 0.28f));
         robotNext.onClick.AddListener(() => CycleRobot(slot, +1));
 
         // Spawn selector (right side, bottom half)
-        var spawnPrev = MakeButton(root.transform, "◀", 0.40f, 0f, 0.47f, 0.5f,
+        var spawnPrev = MakeButton(root.transform, "<", 0.40f, 0f, 0.47f, 0.5f,
             new Color(0.2f, 0.2f, 0.28f));
         spawnPrev.onClick.AddListener(() => CycleSpawn(slot, -1));
 
@@ -335,13 +347,13 @@ public class NetworkLobbyUI : MonoBehaviour
             TextAlignmentOptions.Center, 0.48f, 0f, 0.76f, 0.5f,
             new Color(0.7f, 0.7f, 0.85f));
 
-        var spawnNext = MakeButton(root.transform, "▶", 0.77f, 0f, 0.84f, 0.5f,
+        var spawnNext = MakeButton(root.transform, ">", 0.77f, 0f, 0.84f, 0.5f,
             new Color(0.2f, 0.2f, 0.28f));
         spawnNext.onClick.AddListener(() => CycleSpawn(slot, +1));
 
         return new SlotRowUI
         {
-            root = root, dot = dot, nameLabel = nameLabel,
+            root = root, dot = dot, nameLabel = nameLabel, robotIcon = robotIcon,
             robotLabel = robotLabel, robotPrev = robotPrev, robotNext = robotNext,
             spawnLabel = spawnLabel, spawnPrev = spawnPrev, spawnNext = spawnNext,
         };
@@ -418,7 +430,7 @@ public class NetworkLobbyUI : MonoBehaviour
 
             // Name label: slot + username
             string slotTag = i == 0 ? "P1 (HOST)" : $"P{i + 1}";
-            if (isOwn) slotTag += " ★";
+            if (isOwn) slotTag += " (you)";
             string displayName = s.connected ? $"{slotTag}\n{s.username}" : $"{slotTag}\n—";
             if (_rows[i].nameLabel != null) _rows[i].nameLabel.text = displayName;
 
@@ -426,10 +438,22 @@ public class NetworkLobbyUI : MonoBehaviour
             string robotName = (_robotNames.Count > 0 && s.robotIndex < _robotNames.Count)
                 ? _robotNames[s.robotIndex] : "—";
             if (_rows[i].robotLabel != null)
-                _rows[i].robotLabel.text = $"🤖 {robotName}";
+                _rows[i].robotLabel.text = robotName;
             // Show arrows only for own slot
             _rows[i].robotPrev?.gameObject.SetActive(isOwn);
             _rows[i].robotNext?.gameObject.SetActive(isOwn);
+
+            // Robot icon
+            if (_rows[i].robotIcon != null && LM != null && s.connected)
+            {
+                var spr = LM.GetRobotPreviewSpriteAt(s.robotIndex);
+                _rows[i].robotIcon.sprite  = spr;
+                _rows[i].robotIcon.enabled = spr != null;
+            }
+            else if (_rows[i].robotIcon != null && !s.connected)
+            {
+                _rows[i].robotIcon.enabled = false;
+            }
 
             // Spawn
             var spawnList = s.isBlue ? _blueSpawns : _redSpawns;
@@ -437,7 +461,7 @@ public class NetworkLobbyUI : MonoBehaviour
                 ? spawnList[s.spawnIndex] : "—";
             string side = s.isBlue ? "Blue" : "Red";
             if (_rows[i].spawnLabel != null)
-                _rows[i].spawnLabel.text = $"📍 {side}: {spawnName}";
+                _rows[i].spawnLabel.text = $"{side}: {spawnName}";
             _rows[i].spawnPrev?.gameObject.SetActive(isOwn);
             _rows[i].spawnNext?.gameObject.SetActive(isOwn);
         }
@@ -467,6 +491,12 @@ public class NetworkLobbyUI : MonoBehaviour
     {
         if (NetworkBootstrapper.Instance == null) { SetPreStatus("NetworkBootstrapper not found."); return; }
         SavePlayerPrefs();
+        // Ensure any previous session is fully torn down before starting a new one
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening)
+        {
+            NetworkManager.Singleton.Shutdown();
+            await System.Threading.Tasks.Task.Delay(150);
+        }
         SetPreStatus("Creating relay…");
         try
         {
@@ -495,6 +525,12 @@ public class NetworkLobbyUI : MonoBehaviour
         if (string.IsNullOrEmpty(code)) { SetPreStatus("Enter a join code first."); return; }
         if (NetworkBootstrapper.Instance == null) { SetPreStatus("NetworkBootstrapper not found."); return; }
         SavePlayerPrefs();
+        // Ensure any previous session is fully torn down before joining a new one
+        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening)
+        {
+            NetworkManager.Singleton.Shutdown();
+            await System.Threading.Tasks.Task.Delay(150);
+        }
         SetPreStatus("Joining relay…");
         try
         {
