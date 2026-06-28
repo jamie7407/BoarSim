@@ -552,17 +552,20 @@ public class NetworkLobbyUI : MonoBehaviour
     {
         if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsHost) return;
         var settings = BuildMatchSettings();
-        // Apply on host and broadcast to clients via existing GameNetworkManager path
         var gnm = GameNetworkManager.Instance;
         if (gnm == null) return;
+
+        // Reset the host's field FIRST so FMS.MatchTimer and ScoreHolder are at their start
+        // values before BroadcastMatchStart pre-flushes them into NetworkVariables.
+        // Without this ordering, the client receives stale end-of-match values (timer=-3,
+        // score=old) and re-triggers MatchEndPause at the start of the second match.
         if (LM != null) LM.ApplySettings(settings);
-        gnm.BroadcastMatchStart(settings);
-        // Trigger local match start (same as OptionsMenuController ApplyAndClose)
         if (LM != null) LM.ResetField();
-        // Block start sound until countdown ends (FMS.Restart sets enabled; override to disabled
-        // so HandleSounds() can't fire before the countdown coroutine reaches GO!).
+        // Block start sound until countdown ends (FMS.Restart sets enabled; override here).
         if (NetworkManager.Singleton?.ConnectedClientsList.Count > 1)
             FMS.RobotState = RobotState.disabled;
+
+        gnm.BroadcastMatchStart(settings);
         Close();
     }
 

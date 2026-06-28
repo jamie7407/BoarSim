@@ -492,12 +492,7 @@ using PlayMode = Util.PlayMode;
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
         if (rb != null && rb.isKinematic)
-        {
-            // Extrapolate forward ~30 ms to compensate for half-RTT delay between
-            // the host capturing this position and the client applying it.
-            const float kExtrapolation = 0.03f;
-            _kinematicTargets[rb] = (pos + vel * kExtrapolation, rot);
-        }
+            _kinematicTargets[rb] = (pos, rot);
     }
 
     // Teleport a kinematic body to target position. rb.position= does not generate
@@ -799,9 +794,21 @@ using PlayMode = Util.PlayMode;
 
     // Call from OptionsMenuController.ApplyAndClose() when hosting.
     // Sends host's settings to all clients so they start the same match automatically.
+    // Must be called AFTER the host's ResetField() so FMS.MatchTimer is already at matchTime.
     public void BroadcastMatchStart(MatchSettings settings)
     {
         if (!IsHost || !IsSpawned) return;
+
+        // Pre-flush reset state into NetworkVariables before the RPC so both updates
+        // land in the same NGO tick. Without this, the client's LateUpdate can override
+        // the freshly-reset FMS timer/score with the stale end-of-previous-match values
+        // for 1–2 frames, which re-triggers MatchEndPause and freezes the second match.
+        _netMatchTimer.Value = FMS.MatchTimer;        // matchTime, after ResetField
+        _netMatchState.Value = (byte)MatchState.auto;
+        _netRobotState.Value = (byte)RobotState.disabled;
+        _netBlueScore.Value  = 0;
+        _netRedScore.Value   = 0;
+
         SyncAndStartMatchClientRpc(
             (byte)settings.playMode,
             (byte)Mathf.Clamp(settings.robotIndex1, 0, 255),
