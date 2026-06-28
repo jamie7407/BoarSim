@@ -64,6 +64,9 @@ using PlayMode = Util.PlayMode;
     private Canvas _countdownCanvas;
     private TMP_Text _countdownLabel;
     private bool _countdownRunning;
+    private Canvas _disconnectCanvas;
+    private TMP_Text _disconnectLabel;
+    private bool _weAreLeaving;
     private int _robotSyncTick;
 
     // Tracks the LoadMatch.SetupVersion for which we last applied role config.
@@ -99,6 +102,7 @@ using PlayMode = Util.PlayMode;
 
     public override void OnNetworkSpawn()
     {
+        _weAreLeaving = false;
         _loadMatch = FindFirstObjectByType<LoadMatch>();
         if (_loadMatch == null) { StartCoroutine(WaitForLoadMatch()); return; }
         OnLoadMatchReady();
@@ -119,7 +123,8 @@ using PlayMode = Util.PlayMode;
         if (IsHost)
         {
             _netPlayMode.Value = (byte)_loadMatch.GetSettingsCopy().playMode;
-            NetworkManager.OnClientConnectedCallback += OnClientConnected;
+            NetworkManager.OnClientConnectedCallback    += OnClientConnected;
+            NetworkManager.OnClientDisconnectCallback   += OnRemoteClientDisconnected;
         }
 
         if (IsClient && !IsHost)
@@ -144,7 +149,10 @@ using PlayMode = Util.PlayMode;
     public override void OnNetworkDespawn()
     {
         if (IsServer)
-            NetworkManager.OnClientConnectedCallback -= OnClientConnected;
+        {
+            NetworkManager.OnClientConnectedCallback  -= OnClientConnected;
+            NetworkManager.OnClientDisconnectCallback -= OnRemoteClientDisconnected;
+        }
 
         if (IsClient && !IsHost && NetworkManager.CustomMessagingManager != null)
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_JOINT_SYNC);
@@ -865,6 +873,107 @@ using PlayMode = Util.PlayMode;
         // Apply role config and update the version tracker so Update() doesn't re-apply.
         _lastAppliedSetupVersion = _loadMatch.SetupVersion;
         ApplyRoleToLoadedMatch();
+    }
+
+    // ── Disconnect / leave match ──────────────────────────────────────────────
+
+    // Called when host or client intentionally ends the match via ESC.
+    public void LeaveMatch()
+    {
+        if (!IsSpawned || !NetworkManager.Singleton.IsListening) return;
+        _weAreLeaving = true;
+
+        if (IsHost)
+        {
+            NotifyMatchEndedClientRpc();
+            StartCoroutine(ShutdownAfterNotify());
+        }
+        else
+        {
+            NetworkManager.Singleton.Shutdown();
+            _loadMatch?.ResetField();
+        }
+    }
+
+    private IEnumerator ShutdownAfterNotify()
+    {
+        yield return new WaitForSecondsRealtime(0.15f);
+        _loadMatch?.ResetField();
+        NetworkManager.Singleton.Shutdown();
+    }
+
+    [ClientRpc]
+    private void NotifyMatchEndedClientRpc()
+    {
+        if (IsHost) return;
+        ShowDisconnectOverlay("Host ended the game");
+        _loadMatch?.ResetField();
+    }
+
+    // Host: show a message when a remote client drops during a match, then end it.
+    private void OnRemoteClientDisconnected(ulong clientId)
+    {
+        if (!IsHost) return;
+        if (clientId == NetworkManager.LocalClientId) return;
+        if (_weAreLeaving) return;
+        if (_loadMatch?.GetRobotLoaded(0) == null) return;
+        ShowDisconnectOverlay("Opponent disconnected");
+        StartCoroutine(ResetAfterDelay(1.5f));
+    }
+
+    private IEnumerator ResetAfterDelay(float seconds)
+    {
+        yield return new WaitForSecondsRealtime(seconds);
+        _loadMatch?.ResetField();
+    }
+
+    public void ShowDisconnectOverlay(string message)
+    {
+        EnsureDisconnectUI();
+        _disconnectLabel.text = message;
+        _disconnectCanvas.gameObject.SetActive(true);
+        StartCoroutine(HideDisconnectOverlayAfter(5f));
+    }
+
+    private IEnumerator HideDisconnectOverlayAfter(float seconds)
+    {
+        yield return new WaitForSecondsRealtime(seconds);
+        if (_disconnectCanvas != null) _disconnectCanvas.gameObject.SetActive(false);
+    }
+
+    private void EnsureDisconnectUI()
+    {
+        if (_disconnectCanvas != null) return;
+
+        var go = new GameObject("[DisconnectOverlay]");
+        var canvas = go.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = 998;
+        go.AddComponent<CanvasScaler>();
+
+        var panelGo = new GameObject("Panel");
+        panelGo.transform.SetParent(go.transform, false);
+        var panelRect = panelGo.AddComponent<RectTransform>();
+        panelRect.anchorMin = new Vector2(0.15f, 0.38f);
+        panelRect.anchorMax = new Vector2(0.85f, 0.62f);
+        panelRect.sizeDelta = Vector2.zero;
+        var panelImg = panelGo.AddComponent<Image>();
+        panelImg.color = new Color(0f, 0f, 0f, 0.75f);
+
+        var textGo = new GameObject("Label");
+        textGo.transform.SetParent(go.transform, false);
+        var textRect = textGo.AddComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.sizeDelta = Vector2.zero;
+        var tmp = textGo.AddComponent<TextMeshProUGUI>();
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.fontSize = 48;
+        tmp.color = Color.white;
+
+        _disconnectCanvas = canvas;
+        _disconnectLabel = tmp;
+        go.SetActive(false);
     }
 
     // ── Countdown ─────────────────────────────────────────────────────────────

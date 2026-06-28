@@ -796,11 +796,16 @@ public class NetworkLobbyUI : MonoBehaviour
             r.ReadValueSafe(out byte robotIdx);
             r.ReadValueSafe(out byte spawnIdx);
             string username = ReadString(r);
-            _slots[i].connected  = conn != 0;
-            _slots[i].robotIndex = robotIdx;
-            _slots[i].spawnIndex = spawnIdx;
-            // Don't overwrite own username
-            if (i != _mySlot) _slots[i].username = username;
+            _slots[i].connected = conn != 0;
+            // Don't overwrite own selections — the client is authoritative for its
+            // own slot; a stale broadcast can arrive before the host reflects our
+            // latest SendMyState, which would bounce the index back.
+            if (i != _mySlot)
+            {
+                _slots[i].robotIndex = robotIdx;
+                _slots[i].spawnIndex = spawnIdx;
+                _slots[i].username   = username;
+            }
         }
         RefreshLobbyView();
     }

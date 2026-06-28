@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using TMPro;
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.UI;
@@ -509,8 +510,20 @@ namespace Util
 
                 _isOpen = false;
 
-                if (loadMatch != null) loadMatch.ResetField();
-                else SetRobotInputsEnabled(true);
+                var gnm = GameNetworkManager.Instance;
+                var nm  = NetworkManager.Singleton;
+                if (gnm != null && nm != null && nm.IsListening)
+                {
+                    gnm.LeaveMatch();
+                }
+                else if (loadMatch != null)
+                {
+                    loadMatch.ResetField();
+                }
+                else
+                {
+                    SetRobotInputsEnabled(true);
+                }
             }
 
             void Done() { _isTransitioning = false; }
