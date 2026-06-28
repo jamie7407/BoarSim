@@ -116,6 +116,9 @@ public class NetworkLobbyUI : MonoBehaviour
         DeregisterMessages();
         UnregisterNetworkCallbacks();
         if (_rootPanel != null) _rootPanel.SetActive(false);
+        // OpenMultiplayer() pauses time (timeScale=0) when opened from the options menu.
+        // Restore it here so SetupInputsWhenReady (uses Time.time) can actually finish.
+        Time.timeScale = 1f;
     }
 
     public bool IsOpen => _rootPanel != null && _rootPanel.activeSelf;

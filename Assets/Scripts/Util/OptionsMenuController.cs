@@ -1143,6 +1143,9 @@ namespace Util
             else
             {
                 // Menu already closed (match was already running); just reset with new settings.
+                // Restore timeScale in case the player opened the options menu before joining —
+                // OpenMultiplayer() doesn't call ResumeRuntimeState(), leaving timeScale=0.
+                ResumeRuntimeState();
                 loadMatch.ApplySettings(settings);
                 loadMatch.ResetField();
             }
