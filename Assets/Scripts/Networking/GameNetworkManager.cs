@@ -322,7 +322,10 @@ using PlayMode = Util.PlayMode;
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
+                // Interpolate smooths the visual between 50 Hz physics steps on high-refresh
+                // displays. Safe with rb.position= in FixedUpdate because we never write
+                // transform.position directly outside FixedUpdate.
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -345,7 +348,7 @@ using PlayMode = Util.PlayMode;
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -477,19 +480,24 @@ using PlayMode = Util.PlayMode;
         Vector3 p3, Quaternion r3, Vector3 v3)
     {
         if (IsHost || _loadMatch == null) return;
-        ApplyRobot(0, p0, r0);
-        ApplyRobot(1, p1, r1);
-        ApplyRobot(2, p2, r2);
-        ApplyRobot(3, p3, r3);
+        ApplyRobot(0, p0, r0, v0);
+        ApplyRobot(1, p1, r1, v1);
+        ApplyRobot(2, p2, r2, v2);
+        ApplyRobot(3, p3, r3, v3);
     }
 
-    private void ApplyRobot(int slot, Vector3 pos, Quaternion rot)
+    private void ApplyRobot(int slot, Vector3 pos, Quaternion rot, Vector3 vel)
     {
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
         var rb = robot.GetComponent<Rigidbody>();
         if (rb != null && rb.isKinematic)
-            _kinematicTargets[rb] = (pos, rot);
+        {
+            // Extrapolate forward ~30 ms to compensate for half-RTT delay between
+            // the host capturing this position and the client applying it.
+            const float kExtrapolation = 0.03f;
+            _kinematicTargets[rb] = (pos + vel * kExtrapolation, rot);
+        }
     }
 
     // Teleport a kinematic body to target position. rb.position= does not generate
@@ -618,7 +626,7 @@ using PlayMode = Util.PlayMode;
                         if (!rb.isKinematic)
                         {
                             rb.isKinematic = true;
-                            rb.interpolation = RigidbodyInterpolation.None;
+                            rb.interpolation = RigidbodyInterpolation.Interpolate;
                             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                         }
                         fbuf.Add(rb);

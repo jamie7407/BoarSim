@@ -192,7 +192,7 @@ public class FMS : MonoBehaviour
         MatchState = MatchState.auto;
         RobotState = RobotState.disabled;
 
-        yield return new WaitForSeconds(autoDisableTime);
+        yield return new WaitForSecondsRealtime(autoDisableTime);
 
         MatchState = MatchState.teleop;
         RobotState = RobotState.enabled;
@@ -209,10 +209,10 @@ public class FMS : MonoBehaviour
     private IEnumerator MatchEndPause()
     {
         matchEndPauseStarted = true;
-        
+
         RobotState = RobotState.disabled;
 
-        yield return new WaitForSeconds(matchDisabledTime);
+        yield return new WaitForSecondsRealtime(matchDisabledTime);
 
         MatchState = MatchState.finished;
         RobotState = RobotState.enabled;
@@ -262,6 +262,10 @@ public class FMS : MonoBehaviour
         {
             audioSource = GetComponent<AudioSource>();
         }
+
+        // Ensure FMS sounds play through pause screens and during timeScale=0 menus.
+        if (audioSource != null)
+            audioSource.ignoreListenerPause = true;
 
         if (optionsMenu == null)
         {
