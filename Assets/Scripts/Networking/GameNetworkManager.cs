@@ -33,11 +33,10 @@ using PlayMode = Util.PlayMode;
     // OptionsMenuController subscribes to apply host settings and start the match automatically.
     public static event Action<MatchSettings> OnNetworkMatchStart;
 
-    // Sync every FixedUpdate (50 Hz) so each MovePosition sweep covers exactly one
-    // tick's worth of displacement. At N=3 (16.7 Hz) the sweep covers 3 ticks in 1
-    // step, tripling the apparent kinematic velocity and causing ball-pile explosions.
-    [Tooltip("Broadcast robot transforms every N FixedUpdate ticks (1 = 50 Hz, no velocity amplification)")]
-    [SerializeField] private int robotSyncEveryNFixed = 1;
+    // Sync rate: broadcast every N FixedUpdate ticks (50 Hz / N).
+    // N=2 = 25 Hz; rb.position= teleport + Rigidbody.interpolation keeps visuals smooth.
+    // Velocity-amplification issue that required N=1 was fixed (using rb.position= not MovePosition).
+    private readonly int robotSyncEveryNFixed = 2;
 
     private const string MSG_JOINT_SYNC = "BoarSim.JointSync";
 
@@ -92,11 +91,17 @@ using PlayMode = Util.PlayMode;
     // ball-pile explosions when multiple packets were batched before one FixedUpdate.
     private readonly Dictionary<Rigidbody, (Vector3 pos, Quaternion rot)> _kinematicTargets = new();
 
-    // Cached filtered joint RB list per robot slot. OnJointSyncReceived called 50×/sec —
-    // GetComponentsInChildren on every call was a significant CPU cost. Invalidated whenever
-    // the robot changes (SetupVersion increments on ResetField).
+    // Client-side receive cache: filtered joint RB list per slot.
+    // Invalidated when SetupVersion changes (robot swapped or field reset).
     private readonly Rigidbody[][] _cachedJointRbs = new Rigidbody[4][];
     private int _jointCacheSetupVersion = -1;
+
+    // Host-side send cache: same data, rebuilt on SetupVersion change.
+    // Eliminates GetComponentsInChildren calls at 50 Hz from SendJointSync.
+    private readonly Rigidbody[][] _cachedSendJointRbs = new Rigidbody[4][];
+    private readonly Transform[]   _cachedSendTransforms = new Transform[4];
+    private int _sendCacheSetupVersion = -1;
+    private readonly List<Rigidbody> _rbScratch = new List<Rigidbody>();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -465,47 +470,10 @@ using PlayMode = Util.PlayMode;
         if (_loadMatch == null) return;
         if (NetworkManager.ConnectedClientsList.Count <= 1) return;
 
-        SyncRobotsClientRpc(
-            GetRobotPos(0), GetRobotRot(0), GetRobotVel(0),
-            GetRobotPos(1), GetRobotRot(1), GetRobotVel(1),
-            GetRobotPos(2), GetRobotRot(2), GetRobotVel(2),
-            GetRobotPos(3), GetRobotRot(3), GetRobotVel(3)
-        );
-
+        // Root transforms are embedded in SendJointSync — no separate ClientRpc needed.
         SendJointSync();
     }
 
-    private Vector3    GetRobotPos(int s) { var r = _loadMatch.GetRobotLoaded(s); return r != null ? r.transform.position : Vector3.zero; }
-    private Quaternion GetRobotRot(int s) { var r = _loadMatch.GetRobotLoaded(s); return r != null ? r.transform.rotation : Quaternion.identity; }
-    private Vector3    GetRobotVel(int s) { var r = _loadMatch.GetRobotLoaded(s); if (r == null) return Vector3.zero; var rb = r.GetComponent<Rigidbody>(); return rb != null ? rb.velocity : Vector3.zero; }
-
-    [ClientRpc]
-    private void SyncRobotsClientRpc(
-        Vector3 p0, Quaternion r0, Vector3 v0,
-        Vector3 p1, Quaternion r1, Vector3 v1,
-        Vector3 p2, Quaternion r2, Vector3 v2,
-        Vector3 p3, Quaternion r3, Vector3 v3)
-    {
-        if (IsHost || _loadMatch == null) return;
-        ApplyRobot(0, p0, r0, v0);
-        ApplyRobot(1, p1, r1, v1);
-        ApplyRobot(2, p2, r2, v2);
-        ApplyRobot(3, p3, r3, v3);
-    }
-
-    private void ApplyRobot(int slot, Vector3 pos, Quaternion rot, Vector3 vel)
-    {
-        var robot = _loadMatch.GetRobotLoaded(slot);
-        if (robot == null) return;
-        var rb = robot.GetComponent<Rigidbody>();
-        if (rb != null && rb.isKinematic)
-            _kinematicTargets[rb] = (pos, rot);
-    }
-
-    // Teleport a kinematic body to target position. rb.position= does not generate
-    // PhysX contacts, so the kinematic robot body never imparts infinite-mass impulses
-    // on nearby dynamic balls. Ball positions are authoritatively driven by the host's
-    // physics and shown on the client via MSG_DELTA, so local collision is not needed.
     private static void KinematicMove(Rigidbody rb, Vector3 pos, Quaternion rot)
     {
         rb.position = pos;
@@ -513,62 +481,67 @@ using PlayMode = Util.PlayMode;
     }
 
     // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots
-    // into a single unreliable custom message.  Root pos/rot is embedded alongside the joints
-    // so the client always applies joints relative to the exact root sent in the same packet —
-    // eliminating the race condition between the reliable ClientRpc root sync and this message.
+    // into a single unreliable custom message using half-precision floats (float16).
+    // Root pos/rot is embedded per slot so clients need no separate root sync message.
+    // Joint lists are cached per SetupVersion to avoid GetComponentsInChildren at 50 Hz.
     private void SendJointSync()
     {
-        // First pass: collect filtered Rigidbody lists and store root transforms.
-        var perSlot       = new List<Rigidbody>[4];
-        var slotTransform = new Transform[4];
+        // Rebuild joint cache when the field resets (new robots spawned).
+        int setupVer = _loadMatch.SetupVersion;
+        if (setupVer != _sendCacheSetupVersion)
+        {
+            _sendCacheSetupVersion = setupVer;
+            for (int slot = 0; slot < 4; slot++)
+            {
+                var robot = _loadMatch.GetRobotLoaded(slot);
+                _cachedSendTransforms[slot] = robot != null ? robot.transform : null;
+                _cachedSendJointRbs[slot]   = null;
+                if (robot == null) continue;
+                var rootRb = robot.GetComponent<Rigidbody>();
+                _rbScratch.Clear();
+                foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
+                {
+                    if (rb == rootRb) continue;
+                    if (rb.GetComponent<GamePiece>() != null) continue;
+                    _rbScratch.Add(rb);
+                }
+                if (_rbScratch.Count > 0)
+                    _cachedSendJointRbs[slot] = _rbScratch.ToArray();
+            }
+        }
+
+        // Calculate buffer size. Half-precision: pos=6 B, rot=8 B per transform.
+        // Per slot: slot(1) + rootPos(6) + rootRot(8) + count(1) + joints(count×14)
         int totalBytes = 0;
         for (int slot = 0; slot < 4; slot++)
         {
-            var robot = _loadMatch.GetRobotLoaded(slot);
-            if (robot == null) continue;
-            slotTransform[slot] = robot.transform;
-            var rootRb = robot.GetComponent<Rigidbody>();
-            var buf = new List<Rigidbody>();
-            foreach (var rb in robot.GetComponentsInChildren<Rigidbody>())
-            {
-                if (rb == rootRb) continue;
-                if (rb.GetComponent<GamePiece>() != null) continue;
-                buf.Add(rb);
-            }
-            if (buf.Count == 0) continue;
-            perSlot[slot] = buf;
-            int clamped = Mathf.Min(buf.Count, 255);
-            // slot(1) + rootPos(12) + rootRot(16) + count(1) + joints(count*28)
-            totalBytes += 30 + clamped * 28;
+            var buf = _cachedSendJointRbs[slot];
+            if (buf == null) continue;
+            totalBytes += 16 + Mathf.Min(buf.Length, 255) * 14;
         }
         if (totalBytes == 0) return;
 
         using var writer = new FastBufferWriter(totalBytes, Allocator.Temp);
         for (int slot = 0; slot < 4; slot++)
         {
-            var buf     = perSlot[slot];
-            var robotTx = slotTransform[slot];
+            var buf     = _cachedSendJointRbs[slot];
+            var robotTx = _cachedSendTransforms[slot];
             if (buf == null || robotTx == null) continue;
 
-            // Embed root world pos/rot so the client uses exactly this root, not one from a
-            // separately-timed reliable message (which may arrive in a different network tick).
             var rp = robotTx.position;
             var rq = robotTx.rotation;
             writer.WriteValueSafe((byte)slot);
-            writer.WriteValueSafe(rp.x); writer.WriteValueSafe(rp.y); writer.WriteValueSafe(rp.z);
-            writer.WriteValueSafe(rq.x); writer.WriteValueSafe(rq.y); writer.WriteValueSafe(rq.z); writer.WriteValueSafe(rq.w);
-            writer.WriteValueSafe((byte)Mathf.Min(buf.Count, 255));
+            writer.WriteValueSafe(Mathf.FloatToHalf(rp.x)); writer.WriteValueSafe(Mathf.FloatToHalf(rp.y)); writer.WriteValueSafe(Mathf.FloatToHalf(rp.z));
+            writer.WriteValueSafe(Mathf.FloatToHalf(rq.x)); writer.WriteValueSafe(Mathf.FloatToHalf(rq.y)); writer.WriteValueSafe(Mathf.FloatToHalf(rq.z)); writer.WriteValueSafe(Mathf.FloatToHalf(rq.w));
 
-            int limit = Mathf.Min(buf.Count, 255);
+            int limit = Mathf.Min(buf.Length, 255);
+            writer.WriteValueSafe((byte)limit);
             for (int j = 0; j < limit; j++)
             {
-                // Send world-space positions directly — no local-space conversion.
-                // The embedded root ensures these are always from the same physics tick,
-                // so clients apply them without needing to reconstruct from local space.
                 var p = buf[j].position;
                 var q = buf[j].rotation;
-                writer.WriteValueSafe(p.x); writer.WriteValueSafe(p.y); writer.WriteValueSafe(p.z);
-                writer.WriteValueSafe(q.x); writer.WriteValueSafe(q.y); writer.WriteValueSafe(q.z); writer.WriteValueSafe(q.w);
+                writer.WriteValueSafe(Mathf.FloatToHalf(p.x)); writer.WriteValueSafe(Mathf.FloatToHalf(p.y)); writer.WriteValueSafe(Mathf.FloatToHalf(p.z));
+                writer.WriteValueSafe(Mathf.FloatToHalf(q.x)); writer.WriteValueSafe(Mathf.FloatToHalf(q.y)); writer.WriteValueSafe(Mathf.FloatToHalf(q.z)); writer.WriteValueSafe(Mathf.FloatToHalf(q.w));
             }
         }
 
@@ -587,11 +560,11 @@ using PlayMode = Util.PlayMode;
         {
             reader.ReadValueSafe(out byte slot);
 
-            // Root position embedded in this packet — apply it immediately.
-            reader.ReadValueSafe(out float rpx); reader.ReadValueSafe(out float rpy); reader.ReadValueSafe(out float rpz);
-            reader.ReadValueSafe(out float rqx); reader.ReadValueSafe(out float rqy); reader.ReadValueSafe(out float rqz); reader.ReadValueSafe(out float rqw);
-            var rootPos = new Vector3(rpx, rpy, rpz);
-            var rootRot = new Quaternion(rqx, rqy, rqz, rqw);
+            // Root position — half-precision (float16), 6+8 bytes instead of 12+16.
+            reader.ReadValueSafe(out ushort rpx); reader.ReadValueSafe(out ushort rpy); reader.ReadValueSafe(out ushort rpz);
+            reader.ReadValueSafe(out ushort rqx); reader.ReadValueSafe(out ushort rqy); reader.ReadValueSafe(out ushort rqz); reader.ReadValueSafe(out ushort rqw);
+            var rootPos = new Vector3(Mathf.HalfToFloat(rpx), Mathf.HalfToFloat(rpy), Mathf.HalfToFloat(rpz));
+            var rootRot = new Quaternion(Mathf.HalfToFloat(rqx), Mathf.HalfToFloat(rqy), Mathf.HalfToFloat(rqz), Mathf.HalfToFloat(rqw));
 
             reader.ReadValueSafe(out byte jointCount);
 
@@ -644,16 +617,15 @@ using PlayMode = Util.PlayMode;
 
             for (int j = 0; j < jointCount; j++)
             {
-                // Joint positions are sent in world space — apply directly, no conversion.
-                reader.ReadValueSafe(out float px); reader.ReadValueSafe(out float py); reader.ReadValueSafe(out float pz);
-                reader.ReadValueSafe(out float qx); reader.ReadValueSafe(out float qy); reader.ReadValueSafe(out float qz); reader.ReadValueSafe(out float qw);
+                reader.ReadValueSafe(out ushort px); reader.ReadValueSafe(out ushort py); reader.ReadValueSafe(out ushort pz);
+                reader.ReadValueSafe(out ushort qx); reader.ReadValueSafe(out ushort qy); reader.ReadValueSafe(out ushort qz); reader.ReadValueSafe(out ushort qw);
 
                 if (j >= filtered.Length) continue;
                 var rb = filtered[j];
                 if (rb == null) continue;
 
-                var worldPos = new Vector3(px, py, pz);
-                var worldRot = new Quaternion(qx, qy, qz, qw);
+                var worldPos = new Vector3(Mathf.HalfToFloat(px), Mathf.HalfToFloat(py), Mathf.HalfToFloat(pz));
+                var worldRot = new Quaternion(Mathf.HalfToFloat(qx), Mathf.HalfToFloat(qy), Mathf.HalfToFloat(qz), Mathf.HalfToFloat(qw));
                 _kinematicTargets[rb] = (worldPos, worldRot);
             }
         }
