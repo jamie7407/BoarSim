@@ -1,10 +1,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using TMPro;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.UI;
 using PlayMode = Util.PlayMode;
 
 // Single NetworkObject that handles:
@@ -19,7 +21,7 @@ using PlayMode = Util.PlayMode;
 //   2v2  — host controls slots 0-1 (blue), client controls slots 2-3 (red)
 
 [RequireComponent(typeof(NetworkObject))]
-public class GameNetworkManager : NetworkBehaviour
+ public class GameNetworkManager : NetworkBehaviour
 {
     public static GameNetworkManager Instance { get; private set; }
 
@@ -53,7 +55,14 @@ public class GameNetworkManager : NetworkBehaviour
     private readonly NetworkVariable<int> _netRedScore = new(
         0, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
+    // -1=hidden, 3/2/1=counting, 0=GO!
+    private readonly NetworkVariable<sbyte> _netCountdown = new(
+        -1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+
     private LoadMatch _loadMatch;
+    private Canvas _countdownCanvas;
+    private TMP_Text _countdownLabel;
+    private bool _countdownRunning;
     private int _robotSyncTick;
 
     // Tracks the LoadMatch.SetupVersion for which we last applied role config.
@@ -126,6 +135,8 @@ public class GameNetworkManager : NetworkBehaviour
                 if (_lastAppliedSetupVersion >= 0 && _loadMatch != null)
                     ApplyRoleToLoadedMatch();
             };
+
+            _netCountdown.OnValueChanged += (_, v) => UpdateCountdownOverlay(v);
         }
     }
 
@@ -261,7 +272,14 @@ public class GameNetworkManager : NetworkBehaviour
 
             // Only rebind cameras/input when a client is actually connected
             if (NetworkManager.ConnectedClientsList.Count > 1)
+            {
                 _loadMatch.RebindForNetworkPlay(true, mode);
+                if (!_countdownRunning)
+                {
+                    FMS.RobotState = RobotState.disabled;
+                    StartCoroutine(CountdownCoroutine());
+                }
+            }
         }
         else
         {
@@ -793,6 +811,11 @@ public class GameNetworkManager : NetworkBehaviour
         int versionAtRpc = _loadMatch.SetupVersion;
         OnNetworkMatchStart?.Invoke(settings);
 
+        // Block the start sound until the host enables robots after the countdown.
+        // FMS.Restart() (called inside ResetField above) sets RobotState=enabled — this
+        // immediately overrides it to disabled so HandleSounds() can't fire before GO!.
+        FMS.RobotState = RobotState.disabled;
+
         // Belt-and-suspenders: start a coroutine that waits for HandleNetworkMatchStart
         // to trigger ResetField() (version increment) and SetupInputsWhenReady to finish,
         // then explicitly applies role config. This handles cases where the Update()-based
@@ -830,5 +853,75 @@ public class GameNetworkManager : NetworkBehaviour
         // Apply role config and update the version tracker so Update() doesn't re-apply.
         _lastAppliedSetupVersion = _loadMatch.SetupVersion;
         ApplyRoleToLoadedMatch();
+    }
+
+    // ── Countdown ─────────────────────────────────────────────────────────────
+
+    private IEnumerator CountdownCoroutine()
+    {
+        _countdownRunning = true;
+
+        _netCountdown.Value = 3; UpdateCountdownOverlay(3);
+        yield return new WaitForSeconds(1f);
+        _netCountdown.Value = 2; UpdateCountdownOverlay(2);
+        yield return new WaitForSeconds(1f);
+        _netCountdown.Value = 1; UpdateCountdownOverlay(1);
+        yield return new WaitForSeconds(1f);
+
+        // Enable robots the moment GO! appears so FMS timer and start sound fire together.
+        FMS.RobotState = RobotState.enabled;
+        _netCountdown.Value = 0; UpdateCountdownOverlay(0);
+        yield return new WaitForSeconds(1f);
+
+        _netCountdown.Value = -1; UpdateCountdownOverlay(-1);
+        _countdownRunning = false;
+    }
+
+    private void EnsureCountdownUI()
+    {
+        if (_countdownCanvas != null) return;
+
+        var go = new GameObject("[CountdownOverlay]");
+        var canvas = go.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = 999;
+        go.AddComponent<CanvasScaler>();
+
+        // Dark semi-transparent backing panel for readability over any background.
+        var panelGo = new GameObject("Panel");
+        panelGo.transform.SetParent(go.transform, false);
+        var panelRect = panelGo.AddComponent<RectTransform>();
+        panelRect.anchorMin = new Vector2(0.3f, 0.35f);
+        panelRect.anchorMax = new Vector2(0.7f, 0.65f);
+        panelRect.sizeDelta = Vector2.zero;
+        var panelImg = panelGo.AddComponent<Image>();
+        panelImg.color = new Color(0f, 0f, 0f, 0.6f);
+
+        var textGo = new GameObject("Label");
+        textGo.transform.SetParent(go.transform, false);
+        var textRect = textGo.AddComponent<RectTransform>();
+        textRect.anchorMin = Vector2.zero;
+        textRect.anchorMax = Vector2.one;
+        textRect.sizeDelta = Vector2.zero;
+        var tmp = textGo.AddComponent<TextMeshProUGUI>();
+        tmp.alignment = TextAlignmentOptions.Center;
+        tmp.fontSize = 120;
+        tmp.color = Color.white;
+
+        _countdownCanvas = canvas;
+        _countdownLabel = tmp;
+        go.SetActive(false);
+    }
+
+    private void UpdateCountdownOverlay(sbyte value)
+    {
+        EnsureCountdownUI();
+        if (value < 0)
+        {
+            _countdownCanvas.gameObject.SetActive(false);
+            return;
+        }
+        _countdownCanvas.gameObject.SetActive(true);
+        _countdownLabel.text = value == 0 ? "GO!" : value.ToString();
     }
 }

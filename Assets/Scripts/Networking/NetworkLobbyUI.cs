@@ -559,6 +559,10 @@ public class NetworkLobbyUI : MonoBehaviour
         gnm.BroadcastMatchStart(settings);
         // Trigger local match start (same as OptionsMenuController ApplyAndClose)
         if (LM != null) LM.ResetField();
+        // Block start sound until countdown ends (FMS.Restart sets enabled; override to disabled
+        // so HandleSounds() can't fire before the countdown coroutine reaches GO!).
+        if (NetworkManager.Singleton?.ConnectedClientsList.Count > 1)
+            FMS.RobotState = RobotState.disabled;
         Close();
     }
 

@@ -295,20 +295,34 @@ public class PieceSyncManager : NetworkBehaviour
             var vel   = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
             float spd = vel.magnitude;
 
-            Vector3 target;
-            if (spd > 1f && _recvTime.TryGetValue(id, out float t0))
+            // Dead-reckon the server position forward to now; add gravity for airborne balls.
+            Vector3 serverTarget;
+            if (spd > 0.5f && _recvTime.TryGetValue(id, out float t0))
             {
-                float dt = Time.fixedTime - t0;
-                // 200 ms window: Relay latency (~40 ms) + 4-packet rotation cycle (~120 ms)
-                // means any given ball's gap between updates is ~160 ms. The old 80 ms cutoff
-                // caused the ball to freeze at its last known position for ~80 ms then snap —
-                // exactly the visible jitter at speed. 200 ms keeps extrapolation running the
-                // full inter-packet gap so the ball moves continuously.
-                target = dt < 0.2f ? kvp.Value + vel * dt : kvp.Value;
+                float dt = Mathf.Min(Time.fixedTime - t0, 0.2f);
+                serverTarget = kvp.Value + vel * dt + 0.5f * Physics.gravity * (dt * dt);
             }
             else
             {
-                target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
+                serverTarget = kvp.Value;
+            }
+
+            // Distance-weighted correction: skip micro-errors, soft-lerp small drifts, hard-snap large gaps.
+            float errSq = (serverTarget - piece.rb.position).sqrMagnitude;
+            Vector3 target;
+            if (errSq < 0.0002f)
+            {
+                if (_recvRot.TryGetValue(id, out var sr)) piece.rb.MoveRotation(sr);
+                continue;
+            }
+            else if (errSq < 0.09f)
+            {
+                float blend = Mathf.Lerp(6f, 16f, errSq / 0.09f) * Time.fixedDeltaTime;
+                target = Vector3.Lerp(piece.rb.position, serverTarget, blend);
+            }
+            else
+            {
+                target = serverTarget;
             }
 
             piece.rb.MovePosition(target);

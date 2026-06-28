@@ -126,7 +126,7 @@ public class FMS : MonoBehaviour
     {
         float autoEndTime = matchTime - autoTime;
 
-        if (!playedStartMatch)
+        if (!playedStartMatch && RobotState == RobotState.enabled)
         {
             PlaySound(StartMatch);
             playedStartMatch = true;
@@ -220,7 +220,7 @@ public class FMS : MonoBehaviour
 
     private bool CrossedTime(float targetTime)
     {
-        return previousMatchTimer > targetTime && MatchTimer <= targetTime;
+        return previousMatchTimer >= targetTime && MatchTimer < targetTime;
     }
 
     private void PlaySound(AudioClip clip)
