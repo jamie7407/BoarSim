@@ -35,8 +35,9 @@ using PlayMode = Util.PlayMode;
 
     // Sync rate: broadcast every N FixedUpdate ticks (50 Hz / N).
     // N=2 = 25 Hz; rb.position= teleport + Rigidbody.interpolation keeps visuals smooth.
-    // Velocity-amplification issue that required N=1 was fixed (using rb.position= not MovePosition).
-    private readonly int robotSyncEveryNFixed = 2;
+    // Half-precision encoding (commit 9cb1eb5) halved per-joint bytes, so 50 Hz costs the
+    // same bandwidth as the old 25 Hz full-precision path while giving twice the update rate.
+    private readonly int robotSyncEveryNFixed = 1;
 
     private const string MSG_JOINT_SYNC = "BoarSim.JointSync";
 
@@ -85,11 +86,17 @@ using PlayMode = Util.PlayMode;
     private readonly ulong[] _pendingClientTriggeredMask = new ulong[4];
 
     // Buffered MovePosition targets for kinematic robot Rigidbodies on the client.
-    // OnJointSyncReceived (NGO EarlyUpdate) populates this; FixedUpdate consumes it.
-    // Buffering ensures exactly one MovePosition per physics step regardless of how many
-    // sync packets arrive per EarlyUpdate — prevents velocity amplification that caused
-    // ball-pile explosions when multiple packets were batched before one FixedUpdate.
+    // OnJointSyncReceived (NGO EarlyUpdate) populates these; FixedUpdate consumes them in
+    // two passes. Buffering ensures exactly one move per physics step (deduplicates multiple
+    // EarlyUpdate packets) and prevents ball-pile explosions from N-tick velocity amplification.
+    //
+    // _kinematicTargets   — root RBs: absolute world positions from the sync packet.
+    // _jointLocalTargets  — child joint RBs: LOCAL offset from the received root pos/rot.
+    //   Storing local offsets means joints are re-expressed in world space relative to the
+    //   root's NEW physics position in FixedUpdate pass 2, so they always follow the root
+    //   instead of floating at their last world position while the root interpolates forward.
     private readonly Dictionary<Rigidbody, (Vector3 pos, Quaternion rot)> _kinematicTargets = new();
+    private readonly Dictionary<Rigidbody, (Vector3 localPos, Quaternion localRot, Rigidbody root)> _jointLocalTargets = new();
 
     // Client-side receive cache: filtered joint RB list per slot.
     // Invalidated when SetupVersion changes (robot swapped or field reset).
@@ -448,14 +455,33 @@ using PlayMode = Util.PlayMode;
         // Client: apply buffered kinematic teleport targets. Buffering in a dict means
         // multiple packets arriving in the same EarlyUpdate are deduplicated — only the
         // latest position per Rigidbody is applied.
-        if (IsClient && !IsHost && _kinematicTargets.Count > 0)
+        // Two-pass approach: roots first (world), then joints (local → world from root).
+        if (IsClient && !IsHost)
         {
-            foreach (var kvp in _kinematicTargets)
+            if (_kinematicTargets.Count > 0)
             {
-                if (kvp.Key == null || !kvp.Key.isKinematic) continue;
-                KinematicMove(kvp.Key, kvp.Value.pos, kvp.Value.rot);
+                foreach (var kvp in _kinematicTargets)
+                {
+                    if (kvp.Key == null || !kvp.Key.isKinematic) continue;
+                    KinematicMove(kvp.Key, kvp.Value.pos, kvp.Value.rot);
+                }
+                _kinematicTargets.Clear();
             }
-            _kinematicTargets.Clear();
+
+            if (_jointLocalTargets.Count > 0)
+            {
+                foreach (var kvp in _jointLocalTargets)
+                {
+                    var jointRb = kvp.Key;
+                    var (localPos, localRot, rootRb) = kvp.Value;
+                    if (jointRb == null || rootRb == null || !jointRb.isKinematic) continue;
+                    // Re-express local offset in world space using root's updated physics position.
+                    KinematicMove(jointRb,
+                        rootRb.position + rootRb.rotation * localPos,
+                        rootRb.rotation * localRot);
+                }
+                _jointLocalTargets.Clear();
+            }
         }
 
         if (!IsServer) return;
@@ -617,11 +643,14 @@ using PlayMode = Util.PlayMode;
 
                 if (j >= filtered.Length) continue;
                 var rb = filtered[j];
-                if (rb == null) continue;
+                if (rb == null || rootRb == null) continue;
 
                 var worldPos = new Vector3(Mathf.HalfToFloat(px), Mathf.HalfToFloat(py), Mathf.HalfToFloat(pz));
                 var worldRot = new Quaternion(Mathf.HalfToFloat(qx), Mathf.HalfToFloat(qy), Mathf.HalfToFloat(qz), Mathf.HalfToFloat(qw));
-                _kinematicTargets[rb] = (worldPos, worldRot);
+                // Store as local offset from the received root so FixedUpdate can re-express
+                // it relative to where the root actually lands after KinematicMove (pass 1).
+                var invRootRot = Quaternion.Inverse(rootRot);
+                _jointLocalTargets[rb] = (invRootRot * (worldPos - rootPos), invRootRot * worldRot, rootRb);
             }
         }
     }
