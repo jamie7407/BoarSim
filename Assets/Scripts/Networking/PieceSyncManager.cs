@@ -71,10 +71,11 @@ public class PieceSyncManager : NetworkBehaviour
     private Collider[] _cachedRobotColliders = System.Array.Empty<Collider>();
     private float      _robotColCacheTime = -99f;
     // Dead-reckoning state: last authoritative position + velocity received from server.
-    // Used in client FixedUpdate to extrapolate ball positions between 20 Hz server updates.
-    private readonly Dictionary<ushort, Vector3> _recvPos  = new();
-    private readonly Dictionary<ushort, Vector3> _recvVel  = new();
-    private readonly Dictionary<ushort, float>   _recvTime = new();
+    // Used in client FixedUpdate to extrapolate ball positions between server updates.
+    private readonly Dictionary<ushort, Vector3>    _recvPos  = new();
+    private readonly Dictionary<ushort, Vector3>    _recvVel  = new();
+    private readonly Dictionary<ushort, float>      _recvTime = new();
+    private readonly Dictionary<ushort, Quaternion> _recvRot  = new();
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -302,13 +303,15 @@ public class PieceSyncManager : NetworkBehaviour
             }
             else
             {
-                // Lerp smoothly toward the server position each tick (convergence ~10 Hz).
-                // This looks smooth because MovePosition is called every FixedUpdate, giving
-                // Interpolate mode consistent "from/to" positions to render between.
+                // 3 cm deadzone: don't chase server micro-corrections for settled/slow balls.
+                // Contact forces between 460 packed balls produce constant 1-3 cm oscillations
+                // on the host; without this deadzone the client replicates that jitter visually.
+                if ((kvp.Value - piece.rb.position).sqrMagnitude < 0.0009f) continue;
                 target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
             }
 
             piece.rb.MovePosition(target);
+            if (_recvRot.TryGetValue(id, out var storedRot)) piece.rb.MoveRotation(storedRot);
         }
 
         // Ball-robot collision is now handled by Rigidbody.MovePosition in GameNetworkManager:
@@ -383,17 +386,18 @@ public class PieceSyncManager : NetworkBehaviour
 
             bool sleeping = !isStationary && piece.rb.IsSleeping();
 
+            float velSqr = piece.rb.velocity.sqrMagnitude;
             bool posUnchanged =
                 _lastSentPos.TryGetValue(id, out var lp) &&
                 _lastSentRot.TryGetValue(id, out var lr) &&
-                (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
+                (piece.rb.position - lp).sqrMagnitude < 0.0009f && // 3 cm (was 1 cm)
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
-            // Skip if position is unchanged regardless of sleep state. With 460 packed balls
-            // on the field, PhysX contact forces keep most perpetually "awake" with sub-cm
-            // vibrations. Requiring sleeping=true before skipping meant ALL 460 were sent every
-            // rotation, giving each ball only a ~345ms update cycle and causing visible stutter.
-            if (posUnchanged) continue;
+            // Skip if position barely changed AND ball isn't actively moving.
+            // 3 cm threshold filters contact-force vibrations between 460 packed field balls
+            // (1-3 cm amplitude) that kept all balls transmitting every rotation at 1 cm.
+            // The velocity escape (>1 m/s) ensures fast-moving balls are never dropped.
+            if (posUnchanged && velSqr < 1f) continue;
 
             var pos = piece.rb.position;
             var rot = piece.rb.rotation;
@@ -595,6 +599,7 @@ public class PieceSyncManager : NetworkBehaviour
                 _recvPos.Remove(id);
                 _recvVel.Remove(id);
                 _recvTime.Remove(id);
+                _recvRot.Remove(id);
             }
             else
             {
@@ -620,8 +625,11 @@ public class PieceSyncManager : NetworkBehaviour
                 _recvPos[id]  = storedPos;
                 _recvVel[id]  = vel;
                 _recvTime[id] = Time.fixedTime;
-                piece.rb.MovePosition(storedPos);
-                piece.rb.MoveRotation(rot);
+                _recvRot[id]  = rot;
+                // Position and rotation are applied in FixedUpdate, not here.
+                // Calling MovePosition in EarlyUpdate (NGO message handler) and again in
+                // FixedUpdate causes unpredictable behavior on frames where FixedUpdate
+                // doesn't run — the EarlyUpdate snap overrides the smooth interpolation.
             }
         }
     }
