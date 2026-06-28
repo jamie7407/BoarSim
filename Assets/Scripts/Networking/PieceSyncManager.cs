@@ -582,6 +582,13 @@ public class PieceSyncManager : NetworkBehaviour
             if (sleeping)
             {
                 // Sleeping ball: teleport to authoritative rest position and clear dead-reckoning.
+                // Re-assert kinematic so local physics doesn't drift it after landing
+                // (shot balls become dynamic in OnPieceDetachReceived; this re-snaps them).
+                if (!piece.rb.isKinematic)
+                {
+                    piece.rb.isKinematic   = true;
+                    piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
+                }
                 piece.rb.position = pos;
                 piece.rb.rotation = rot;
                 piece.transform.SetPositionAndRotation(pos, rot);
