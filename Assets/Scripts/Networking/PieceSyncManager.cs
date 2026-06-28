@@ -306,7 +306,7 @@ public class PieceSyncManager : NetworkBehaviour
                 // 3 cm deadzone: don't chase server micro-corrections for settled/slow balls.
                 // Contact forces between 460 packed balls produce constant 1-3 cm oscillations
                 // on the host; without this deadzone the client replicates that jitter visually.
-                if ((kvp.Value - piece.rb.position).sqrMagnitude < 0.0009f) continue;
+                if ((kvp.Value - piece.rb.position).sqrMagnitude < 0.0025f) continue;
                 target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
             }
 
@@ -390,7 +390,7 @@ public class PieceSyncManager : NetworkBehaviour
             bool posUnchanged =
                 _lastSentPos.TryGetValue(id, out var lp) &&
                 _lastSentRot.TryGetValue(id, out var lr) &&
-                (piece.rb.position - lp).sqrMagnitude < 0.0009f && // 3 cm (was 1 cm)
+                (piece.rb.position - lp).sqrMagnitude < 0.0025f && // 3 cm (was 1 cm)
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
 
             // Skip if position barely changed AND ball isn't actively moving.
