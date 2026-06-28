@@ -299,14 +299,15 @@ public class PieceSyncManager : NetworkBehaviour
             if (spd > 1f && _recvTime.TryGetValue(id, out float t0))
             {
                 float dt = Time.fixedTime - t0;
-                target = dt < 0.08f ? kvp.Value + vel * dt : kvp.Value;
+                // 200 ms window: Relay latency (~40 ms) + 4-packet rotation cycle (~120 ms)
+                // means any given ball's gap between updates is ~160 ms. The old 80 ms cutoff
+                // caused the ball to freeze at its last known position for ~80 ms then snap —
+                // exactly the visible jitter at speed. 200 ms keeps extrapolation running the
+                // full inter-packet gap so the ball moves continuously.
+                target = dt < 0.2f ? kvp.Value + vel * dt : kvp.Value;
             }
             else
             {
-                // 3 cm deadzone: don't chase server micro-corrections for settled/slow balls.
-                // Contact forces between 460 packed balls produce constant 1-3 cm oscillations
-                // on the host; without this deadzone the client replicates that jitter visually.
-                if ((kvp.Value - piece.rb.position).sqrMagnitude < 0.01f) continue;
                 target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
             }
 
@@ -386,18 +387,12 @@ public class PieceSyncManager : NetworkBehaviour
 
             bool sleeping = !isStationary && piece.rb.IsSleeping();
 
-            float velSqr = piece.rb.velocity.sqrMagnitude;
             bool posUnchanged =
                 _lastSentPos.TryGetValue(id, out var lp) &&
                 _lastSentRot.TryGetValue(id, out var lr) &&
-                (piece.rb.position - lp).sqrMagnitude < 0.01f && // 3 cm (was 1 cm)
+                (piece.rb.position - lp).sqrMagnitude < 0.0001f &&
                 Quaternion.Dot(piece.rb.rotation, lr) > 0.9999f;
-
-            // Skip if position barely changed AND ball isn't actively moving.
-            // 3 cm threshold filters contact-force vibrations between 460 packed field balls
-            // (1-3 cm amplitude) that kept all balls transmitting every rotation at 1 cm.
-            // The velocity escape (>1 m/s) ensures fast-moving balls are never dropped.
-            if (posUnchanged && velSqr < 1f) continue;
+            if (posUnchanged) continue;
 
             var pos = piece.rb.position;
             var rot = piece.rb.rotation;
@@ -603,26 +598,10 @@ public class PieceSyncManager : NetworkBehaviour
             }
             else
             {
-                // Fast balls: blend the server correction with the current dead-reckoned estimate
-                // so a mis-predicted extrapolation doesn't snap the ball back visibly.
-                // Slow balls skip blending — they go straight to server pos (no extrapolation).
-                float speed = vel.magnitude;
-                Vector3 storedPos;
-                if (speed > 1f
-                    && _recvPos.TryGetValue(id, out var lastPos)
-                    && _recvTime.TryGetValue(id, out float lastT))
-                {
-                    var lastVel   = _recvVel.TryGetValue(id, out var lv) ? lv : Vector3.zero;
-                    float elapsed = Time.fixedTime - lastT;
-                    var estimated = elapsed < 0.08f ? lastPos + lastVel * elapsed : lastPos;
-                    // 80% server truth, 20% local estimate — damps oscillation without lag
-                    storedPos = Vector3.Lerp(estimated, pos, 0.8f);
-                }
-                else
-                {
-                    storedPos = pos;
-                }
-                _recvPos[id]  = storedPos;
+                // Store raw server position. FixedUpdate extrapolates forward from here using
+                // vel * dt, which naturally compensates for relay latency without the lag and
+                // oscillation the old 80/20 blend introduced.
+                _recvPos[id]  = pos;
                 _recvVel[id]  = vel;
                 _recvTime[id] = Time.fixedTime;
                 _recvRot[id]  = rot;
