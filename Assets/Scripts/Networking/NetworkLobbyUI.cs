@@ -40,12 +40,12 @@ public class NetworkLobbyUI : MonoBehaviour
     int _mySlot = 0;
     int _modeIdx = 0;           // index into _modes
 
-    readonly (PlayMode mode, string label, int players)[] _modes =
+    readonly (Util.PlayMode mode, string label, int players)[] _modes =
     {
-        (PlayMode.OneVsZero, "1v0",  1),
-        (PlayMode.TwoVsZero, "2v0",  2),
-        (PlayMode.OneVsOne,  "1v1",  2),
-        (PlayMode.TwoVsTwo,  "2v2",  4),
+        (Util.PlayMode.OneVsZero, "1v0",  1),
+        (Util.PlayMode.TwoVsZero, "2v0",  2),
+        (Util.PlayMode.OneVsOne,  "1v1",  2),
+        (Util.PlayMode.TwoVsTwo,  "2v2",  4),
     };
 
     // clientId → slot (host-only map)
