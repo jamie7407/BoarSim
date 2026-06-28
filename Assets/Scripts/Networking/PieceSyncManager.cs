@@ -49,6 +49,8 @@ public class PieceSyncManager : NetworkBehaviour
     private readonly HashSet<ushort> _pendingDeleteIds = new();
     // Tracks last-known piece state per ID to detect hold/release transitions.
     private readonly Dictionary<ushort, GamePieceState> _lastPieceState = new();
+    // Tracks last-known owner per ID to detect transfer between nodes (both Stationary).
+    private readonly Dictionary<ushort, Transform> _lastOwnerNode = new();
     private int _fixedTick;
     // Rotating start index for delta sends: we process at most kMaxPacketsPerDelta UDP packets
     // per tick, then resume from this ball next tick. All 472 balls are covered in ~6 ticks.
@@ -377,8 +379,26 @@ public class PieceSyncManager : NetworkBehaviour
             {
                 Debug.Log($"[Net][Host] Ball {id} World→Stationary, owner={piece.owner?.name ?? "null"}");
                 SendPieceAttach(id, piece);
+                _lastOwnerNode[id] = piece.owner;
             }
-            else if (!isStationary && wasStationary) SendPieceDetach(id, piece);
+            else if (!isStationary && wasStationary)
+            {
+                SendPieceDetach(id, piece);
+                _lastOwnerNode.Remove(id);
+            }
+            else if (isStationary && wasStationary)
+            {
+                // Detect transfer: ball stayed Stationary but moved to a different BuildNode.
+                // PieceSyncManager only fires World→Stationary once — without this check the
+                // client keeps the ball parented to the intake node even after a transfer to
+                // the shooter node, making shots appear to come from the wrong position.
+                if (_lastOwnerNode.TryGetValue(id, out var prevOwner) && prevOwner != piece.owner && piece.owner != null)
+                {
+                    Debug.Log($"[Net][Host] Ball {id} transferred {prevOwner?.name} → {piece.owner.name}");
+                    SendPieceAttach(id, piece);
+                    _lastOwnerNode[id] = piece.owner;
+                }
+            }
             _lastPieceState[id] = piece.state;
 
             // Stationary balls are parented to robot nodes via MSG_ATTACH on the client.
