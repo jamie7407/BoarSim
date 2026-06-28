@@ -25,6 +25,10 @@ using PlayMode = Util.PlayMode;
 {
     public static GameNetworkManager Instance { get; private set; }
 
+    // Set by NetworkLobbyUI when the host assigns this machine's slot.
+    // -1 means unset (use legacy mode-based range). Persists across match resets.
+    public int LocalClientSlot = -1;
+
     // Fires on the client machine when the host clicks Apply.
     // OptionsMenuController subscribes to apply host settings and start the match automatically.
     public static event Action<MatchSettings> OnNetworkMatchStart;
@@ -164,7 +168,7 @@ using PlayMode = Util.PlayMode;
     {
         if (clientId == NetworkManager.LocalClientId) return;
         if (_loadMatch != null && _loadMatch.GetRobotLoaded(0) != null)
-            _loadMatch.RebindForNetworkPlay(true, (PlayMode)_netPlayMode.Value);
+            _loadMatch.RebindForNetworkPlay(true, (PlayMode)_netPlayMode.Value, 0);
     }
 
     // ── Per-frame ─────────────────────────────────────────────────────────────
@@ -212,7 +216,9 @@ using PlayMode = Util.PlayMode;
     {
         if (_loadMatch == null) return;
         var mode = (PlayMode)_netPlayMode.Value;
-        var (first, last) = ClientSlots(mode);
+        int first, last;
+        if (LocalClientSlot >= 0) { first = LocalClientSlot; last = LocalClientSlot; }
+        else { (first, last) = ClientSlots(mode); }
 
         for (int slot = first; slot <= last; slot++)
         {
@@ -292,7 +298,8 @@ using PlayMode = Util.PlayMode;
             // Only rebind cameras/input when a client is actually connected
             if (NetworkManager.ConnectedClientsList.Count > 1)
             {
-                _loadMatch.RebindForNetworkPlay(true, mode);
+                // Host always controls slot 0; disable input on all other slots.
+                _loadMatch.RebindForNetworkPlay(true, mode, 0);
                 if (!_countdownRunning)
                 {
                     FMS.RobotState = RobotState.disabled;
@@ -305,7 +312,7 @@ using PlayMode = Util.PlayMode;
             // Read mode from local settings applied by SyncAndStartMatchClientRpc rather than
             // from _netPlayMode, which may not have propagated from the host yet at this point.
             var mode = (PlayMode)_loadMatch.GetSettingsCopy().playMode;
-            _loadMatch.RebindForNetworkPlay(false, mode);
+            _loadMatch.RebindForNetworkPlay(false, mode, LocalClientSlot);
 
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
@@ -666,7 +673,9 @@ using PlayMode = Util.PlayMode;
             var mode = _loadMatch != null
                 ? (PlayMode)_loadMatch.GetSettingsCopy().playMode
                 : (PlayMode)_netPlayMode.Value;
-            var (first, last) = ClientSlots(mode);
+            int first, last;
+            if (LocalClientSlot >= 0) { first = LocalClientSlot; last = LocalClientSlot; }
+            else { (first, last) = ClientSlots(mode); }
 
             // Drivetrain every FixedUpdate: SetNetworkDrive() is consumed once per physics frame
             // (_useNetworkDrive resets after use), so we must call it every tick or the robot
@@ -820,7 +829,8 @@ using PlayMode = Util.PlayMode;
             (byte)Mathf.Clamp(settings.redSpawnIndex1, 0, 255),
             (byte)Mathf.Clamp(settings.redSpawnIndex2, 0, 255),
             (byte)settings.view,
-            (byte)(settings.useBlueAlliance ? 1 : 0)
+            (byte)(settings.useBlueAlliance ? 1 : 0),
+            settings.activeSlotMask
         );
     }
 
@@ -828,7 +838,7 @@ using PlayMode = Util.PlayMode;
     private void SyncAndStartMatchClientRpc(
         byte playMode, byte r1, byte r2, byte r3, byte r4,
         byte bs1, byte bs2, byte rs1, byte rs2,
-        byte view, byte useBlue)
+        byte view, byte useBlue, byte activeSlotMask)
     {
         if (IsHost) return; // host already applied locally
         if (_loadMatch == null) return;
@@ -845,6 +855,7 @@ using PlayMode = Util.PlayMode;
         settings.redSpawnIndex2  = rs2;
         settings.view            = (Util.Cameras)view;
         settings.useBlueAlliance = useBlue != 0;
+        settings.activeSlotMask  = activeSlotMask;
 
         // Pre-apply settings so the mode is correct when ApplyRoleToLoadedMatch
         // reads it. HandleNetworkMatchStart may call ApplySettings again (idempotent).

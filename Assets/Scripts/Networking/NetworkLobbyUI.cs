@@ -84,6 +84,7 @@ public class NetworkLobbyUI : MonoBehaviour
         public Button       robotPrev, robotNext;
         public TextMeshProUGUI spawnLabel;
         public Button       spawnPrev, spawnNext;
+        public TextMeshProUGUI teamLabel; // BLUE / RED badge
     }
     readonly SlotRowUI[] _rows = new SlotRowUI[MaxSlots];
 
@@ -354,13 +355,27 @@ public class NetworkLobbyUI : MonoBehaviour
             new Color(0.2f, 0.2f, 0.28f));
         spawnNext.onClick.AddListener(() => CycleSpawn(slot, +1));
 
+        // Team badge (BLUE / RED) — right edge
+        var teamLabel = MakeText(root.transform, "—", 14,
+            TextAlignmentOptions.Center, 0.85f, 0f, 1.0f, 1f,
+            new Color(0.6f, 0.6f, 0.7f));
+
         return new SlotRowUI
         {
             root = root, dot = dot, nameLabel = nameLabel, robotIcon = robotIcon,
             robotLabel = robotLabel, robotPrev = robotPrev, robotNext = robotNext,
             spawnLabel = spawnLabel, spawnPrev = spawnPrev, spawnNext = spawnNext,
+            teamLabel = teamLabel,
         };
     }
+
+    // Returns whether a given slot is on the Blue alliance for the specified mode.
+    static bool GetIsBlueForSlot(int slot, Util.PlayMode mode) => mode switch
+    {
+        Util.PlayMode.TwoVsTwo => slot < 2,
+        Util.PlayMode.OneVsOne => slot == 0,
+        _                      => true   // TwoVsZero, OneVsZero: all Blue
+    };
 
     // ── Names / PlayerPrefs ───────────────────────────────────────────────────
 
@@ -402,7 +417,8 @@ public class NetworkLobbyUI : MonoBehaviour
     void CycleSpawn(int slot, int dir)
     {
         if (slot != _mySlot) return;
-        var list = _slots[slot].isBlue ? _blueSpawns : _redSpawns;
+        bool isBlue = GetIsBlueForSlot(slot, _modes[_modeIdx].mode);
+        var list = isBlue ? _blueSpawns : _redSpawns;
         if (list.Count == 0) return;
         _slots[slot].spawnIndex = (_slots[slot].spawnIndex + dir + list.Count) % list.Count;
         SendMyState();
@@ -458,11 +474,22 @@ public class NetworkLobbyUI : MonoBehaviour
                 _rows[i].robotIcon.enabled = false;
             }
 
+            // Team badge
+            var currentMode = _modes[_modeIdx].mode;
+            bool isBlue = GetIsBlueForSlot(i, currentMode);
+            if (_rows[i].teamLabel != null)
+            {
+                _rows[i].teamLabel.text  = isBlue ? "BLUE" : "RED";
+                _rows[i].teamLabel.color = isBlue
+                    ? new Color(0.3f, 0.6f, 1.0f)
+                    : new Color(1.0f, 0.3f, 0.3f);
+            }
+
             // Spawn
-            var spawnList = s.isBlue ? _blueSpawns : _redSpawns;
+            var spawnList = isBlue ? _blueSpawns : _redSpawns;
             string spawnName = (spawnList.Count > 0 && s.spawnIndex < spawnList.Count)
                 ? spawnList[s.spawnIndex] : "—";
-            string side = s.isBlue ? "Blue" : "Red";
+            string side = isBlue ? "Blue" : "Red";
             if (_rows[i].spawnLabel != null)
                 _rows[i].spawnLabel.text = $"{side}: {spawnName}";
             _rows[i].spawnPrev?.gameObject.SetActive(isOwn);
@@ -588,15 +615,37 @@ public class NetworkLobbyUI : MonoBehaviour
     MatchSettings BuildMatchSettings()
     {
         var s = LM != null ? LM.GetSettingsCopy() : new MatchSettings();
-        s.playMode = _modes[_modeIdx].mode;
-        s.robotIndex1     = _slots[0].robotIndex;
-        s.robotIndex2     = _slots[1].robotIndex;
-        s.robotIndex3     = _slots[2].robotIndex;
-        s.robotIndex4     = _slots[3].robotIndex;
-        s.blueSpawnIndex1 = _slots[0].isBlue ? _slots[0].spawnIndex : _slots[1].spawnIndex;
-        s.blueSpawnIndex2 = _slots[1].isBlue ? _slots[1].spawnIndex : _slots[0].spawnIndex;
-        s.redSpawnIndex1  = !_slots[0].isBlue ? _slots[0].spawnIndex : _slots[1].spawnIndex;
-        s.redSpawnIndex2  = _slots.Length > 2 && !_slots[2].isBlue ? _slots[2].spawnIndex : 0;
+        var mode = _modes[_modeIdx].mode;
+        s.playMode    = mode;
+        s.robotIndex1 = _slots[0].robotIndex;
+        s.robotIndex2 = _slots[1].robotIndex;
+        s.robotIndex3 = _slots[2].robotIndex;
+        s.robotIndex4 = _slots[3].robotIndex;
+
+        if (mode == Util.PlayMode.TwoVsTwo)
+        {
+            // Slot layout: 0,1 = Blue alliance; 2,3 = Red alliance (matches LoadMatch).
+            s.blueSpawnIndex1 = _slots[0].spawnIndex;
+            s.blueSpawnIndex2 = _slots[1].spawnIndex;
+            s.redSpawnIndex1  = _slots[2].spawnIndex;
+            s.redSpawnIndex2  = _slots[3].spawnIndex;
+        }
+        else
+        {
+            // 1v1 / 2v0: slot 0 = Blue, slot 1 = Red
+            s.blueSpawnIndex1 = _slots[0].spawnIndex;
+            s.blueSpawnIndex2 = 0;
+            s.redSpawnIndex1  = _slots[1].spawnIndex;
+            s.redSpawnIndex2  = 0;
+        }
+
+        // Build active-slot bitmask so LoadMatch only spawns robots for connected players.
+        byte mask = 0;
+        int playerCount = _modes[_modeIdx].players;
+        for (int i = 0; i < playerCount; i++)
+            if (_slots[i].connected) mask |= (byte)(1 << i);
+        s.activeSlotMask = mask;
+
         return s;
     }
 
@@ -606,6 +655,8 @@ public class NetworkLobbyUI : MonoBehaviour
         _nextSlot = 1;
         _mySlot = 0;
         for (int i = 0; i < MaxSlots; i++) _slots[i] = SlotData.Empty;
+        var gnm = GameNetworkManager.Instance;
+        if (gnm != null) gnm.LocalClientSlot = -1;
     }
 
     void SetPreStatus(string msg) { if (_preLobbyStatus != null) _preLobbyStatus.text = msg; }
@@ -640,11 +691,12 @@ public class NetworkLobbyUI : MonoBehaviour
         AssignSlotToClient(clientId, slot);
 
         // Mark slot connected with placeholder username
-        _slots[slot].connected = true;
-        _slots[slot].username  = $"Player {slot + 1}";
+        var assignedMode = _modes[_modeIdx].mode;
+        _slots[slot].connected  = true;
+        _slots[slot].username   = $"Player {slot + 1}";
         _slots[slot].robotIndex = 0;
         _slots[slot].spawnIndex = 0;
-        _slots[slot].isBlue    = slot % 2 == 0; // alternate sides
+        _slots[slot].isBlue     = GetIsBlueForSlot(slot, assignedMode);
 
         SendBroadcast();
         RefreshLobbyView();
@@ -697,14 +749,15 @@ public class NetworkLobbyUI : MonoBehaviour
         cmm.UnregisterNamedMessageHandler(MSG_ASSIGN_SLOT);
     }
 
-    // Host → specific client: tell them their slot number
+    // Host → specific client: tell them their slot number and team
     void AssignSlotToClient(ulong clientId, int slot)
     {
-        using var w = new FastBufferWriter(4, Allocator.Temp);
+        bool isBlue = GetIsBlueForSlot(slot, _modes[_modeIdx].mode);
+        using var w = new FastBufferWriter(5, Allocator.Temp);
         w.WriteValueSafe((byte)slot);
         w.WriteValueSafe((byte)_modeIdx);
-        // Also send host's robot index for display
-        w.WriteValueSafe((byte)_slots[0].robotIndex);
+        w.WriteValueSafe((byte)_slots[0].robotIndex); // host robot index for display
+        w.WriteValueSafe((byte)(isBlue ? 1 : 0));
         NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage(
             MSG_ASSIGN_SLOT, clientId, w, NetworkDelivery.Reliable);
     }
@@ -715,23 +768,28 @@ public class NetworkLobbyUI : MonoBehaviour
         r.ReadValueSafe(out byte slot);
         r.ReadValueSafe(out byte modeIdx);
         r.ReadValueSafe(out byte hostRobot);
-        _mySlot = slot;
+        r.ReadValueSafe(out byte isBlueB);
+        _mySlot  = slot;
         _modeIdx = modeIdx;
+        var mode = _modes[modeIdx].mode;
         _slots[0].connected  = true;
         _slots[0].username   = "Host";
         _slots[0].robotIndex = hostRobot;
-        _slots[0].isBlue     = true;
+        _slots[0].isBlue     = GetIsBlueForSlot(0, mode);
         _slots[slot].connected  = true;
         _slots[slot].username   = MyUsername;
         _slots[slot].robotIndex = 0;
-        _slots[slot].isBlue     = slot % 2 == 0;
+        _slots[slot].isBlue     = isBlueB != 0;
 
-        // Send our state to host
+        // Tell GameNetworkManager which slot this machine drives
+        var gnm = GameNetworkManager.Instance;
+        if (gnm != null) gnm.LocalClientSlot = slot;
+
         SendMyState();
         RefreshLobbyView();
     }
 
-    // Client → host: send my username, robot, spawn
+    // Client → host: send my username, robot, spawn, team
     void SendMyState()
     {
         if (NetworkManager.Singleton == null || NetworkManager.Singleton.IsHost) return;
@@ -742,6 +800,7 @@ public class NetworkLobbyUI : MonoBehaviour
         w.WriteValueSafe((byte)_mySlot);
         w.WriteValueSafe((byte)_slots[_mySlot].robotIndex);
         w.WriteValueSafe((byte)_slots[_mySlot].spawnIndex);
+        w.WriteValueSafe((byte)(_slots[_mySlot].isBlue ? 1 : 0));
         WriteString(w, MyUsername);
         cmm.SendNamedMessage(MSG_PLAYER_STATE, NetworkManager.ServerClientId, w,
             NetworkDelivery.Reliable);
@@ -753,11 +812,13 @@ public class NetworkLobbyUI : MonoBehaviour
         r.ReadValueSafe(out byte slot);
         r.ReadValueSafe(out byte robotIdx);
         r.ReadValueSafe(out byte spawnIdx);
+        r.ReadValueSafe(out byte isBlueB);
         string username = ReadString(r);
 
         if (slot >= MaxSlots) return;
         _slots[slot].robotIndex = robotIdx;
         _slots[slot].spawnIndex = spawnIdx;
+        _slots[slot].isBlue     = isBlueB != 0;
         _slots[slot].username   = username;
 
         SendBroadcast();
@@ -773,11 +834,13 @@ public class NetworkLobbyUI : MonoBehaviour
 
         using var w = new FastBufferWriter(256, Allocator.Temp);
         w.WriteValueSafe((byte)_modeIdx);
+        var broadcastMode = _modes[_modeIdx].mode;
         for (int i = 0; i < MaxSlots; i++)
         {
             w.WriteValueSafe(_slots[i].connected ? (byte)1 : (byte)0);
             w.WriteValueSafe((byte)_slots[i].robotIndex);
             w.WriteValueSafe((byte)_slots[i].spawnIndex);
+            w.WriteValueSafe((byte)(GetIsBlueForSlot(i, broadcastMode) ? 1 : 0));
             WriteString(w, _slots[i].username);
         }
         // Broadcast to all connected clients (exclude host)
@@ -793,11 +856,13 @@ public class NetworkLobbyUI : MonoBehaviour
     {
         r.ReadValueSafe(out byte modeIdx);
         _modeIdx = modeIdx;
+        var broadcastMode = _modes[modeIdx].mode;
         for (int i = 0; i < MaxSlots; i++)
         {
             r.ReadValueSafe(out byte conn);
             r.ReadValueSafe(out byte robotIdx);
             r.ReadValueSafe(out byte spawnIdx);
+            r.ReadValueSafe(out byte isBlueB);
             string username = ReadString(r);
             _slots[i].connected = conn != 0;
             // Don't overwrite own selections — the client is authoritative for its
@@ -807,6 +872,7 @@ public class NetworkLobbyUI : MonoBehaviour
             {
                 _slots[i].robotIndex = robotIdx;
                 _slots[i].spawnIndex = spawnIdx;
+                _slots[i].isBlue     = isBlueB != 0;
                 _slots[i].username   = username;
             }
         }

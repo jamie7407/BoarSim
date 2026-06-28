@@ -41,6 +41,7 @@ public class MatchSettings
     public Cameras view = Cameras.ThirdPerson;
     public Util.PlayMode playMode = Util.PlayMode.OneVsZero;
     public bool useBlueAlliance = true;
+    public byte activeSlotMask = 0xFF;  // bitmask: bit N set → slot N has a connected player
 
     public TrackingType trackingType = TrackingType.TrackRobot;
 
@@ -50,8 +51,8 @@ public class MatchSettings
         {
             robotIndex1 = robotIndex1,
             robotIndex2 = robotIndex2,
-            robotIndex3 = robotIndex3,   // NEW
-            robotIndex4 = robotIndex4,   // NEW
+            robotIndex3 = robotIndex3,
+            robotIndex4 = robotIndex4,
             blueSpawnIndex1 = blueSpawnIndex1,
             blueSpawnIndex2 = blueSpawnIndex2,
             redSpawnIndex1 = redSpawnIndex1,
@@ -59,6 +60,7 @@ public class MatchSettings
             view = view,
             playMode = playMode,
             useBlueAlliance = useBlueAlliance,
+            activeSlotMask = activeSlotMask,
             trackingType = trackingType
         };
     }
@@ -656,6 +658,9 @@ public class LoadMatch : MonoBehaviour
         if (_settings.playMode != Util.PlayMode.TwoVsTwo)
             return;
 
+        if ((_settings.activeSlotMask & (1 << 2)) == 0)
+            return; // slot 2 has no connected player — skip robots 3 and 4
+
         Transform p3Spawn = GetSpawnPointForRobot(2);
         if (p3Spawn == null)
         {
@@ -673,6 +678,9 @@ public class LoadMatch : MonoBehaviour
         ConfigureOutpostReleaseOwnership(_activeRobot3, true);
         ApplyBumperNumber(_activeRobot3, _settings.bumperNumber3);
         CreateRobotTag(_activeRobot3, "P3", true);
+
+        if ((_settings.activeSlotMask & (1 << 3)) == 0)
+            return; // slot 3 has no connected player — skip robot 4
 
         Transform p4Spawn = GetSpawnPointForRobot(3);
         if (p4Spawn == null)
@@ -1135,60 +1143,120 @@ public class LoadMatch : MonoBehaviour
     // Reassigns input devices so only the locally-owned slots respond to
     // this machine's keyboard/gamepad.  Also adjusts camera viewports so each
     // machine sees only its own player(s) full-screen.
-    public void RebindForNetworkPlay(bool isHost, Util.PlayMode mode)
+    // localSlot: which slot this machine controls (0 for host, 1-3 for clients).
+    // When -1 (no lobby used), falls back to mode-based range assignment.
+    public void RebindForNetworkPlay(bool isHost, Util.PlayMode mode, int localSlot = -1)
     {
-        int clientFirst, clientLast;
-        switch (mode)
+        if (localSlot >= 0)
         {
-            case Util.PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
-            case Util.PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
-            case Util.PlayMode.TwoVsZero: clientFirst = 1; clientLast = 1; break;
-            default:                      clientFirst = -1; clientLast = -1; break;
-        }
-
-        if (isHost)
-        {
-            // Disable input on client-owned slots so this keyboard can't drive them
-            for (int i = clientFirst; i <= clientLast; i++)
-                DisableRobotInput(GetRobotLoaded(i));
-        }
-        else
-        {
+            // Per-machine slot: only localSlot has active input; all others are disabled.
+            // isHost: PairInputs() already set up slot 0 correctly; just disable others.
+            // !isHost: bind the first available device to this client's slot.
             var pads = Gamepad.all;
-            int clientPadIndex = 0;
-
             for (int i = 0; i < 4; i++)
             {
                 var robot = GetRobotLoaded(i);
                 if (robot == null) continue;
-
-                bool isClientSlot = i >= clientFirst && i <= clientLast;
-                if (!isClientSlot)
+                if (i == localSlot)
                 {
-                    // Host-owned slot: no local physics, no local input
-                    var rb = robot.GetComponent<Rigidbody>();
-                    if (rb != null) rb.isKinematic = true;
-                    DisableRobotInput(robot);
+                    if (!isHost)
+                    {
+                        if (pads.Count > 0)
+                            BindRobotToGamepad(robot, pads[0], gamepadControlScheme);
+                        else if (Keyboard.current != null)
+                            BindRobotToKeyboard(robot, keyboardControlScheme);
+                    }
+                    // isHost: input for slot 0 already paired by PairInputs — no change needed.
                 }
                 else
                 {
-                    // Client-owned slot: claim a gamepad or fall back to keyboard
-                    if (pads.Count > clientPadIndex)
-                        BindRobotToGamepad(robot, pads[clientPadIndex++], gamepadControlScheme);
-                    else if (Keyboard.current != null)
-                        BindRobotToKeyboard(robot, keyboardControlScheme);
+                    if (!isHost)
+                    {
+                        var rb = robot.GetComponent<Rigidbody>();
+                        if (rb != null) rb.isKinematic = true;
+                    }
+                    DisableRobotInput(robot);
+                }
+            }
+        }
+        else
+        {
+            // Legacy fallback: derive client range from play mode.
+            int clientFirst, clientLast;
+            switch (mode)
+            {
+                case Util.PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
+                case Util.PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
+                case Util.PlayMode.TwoVsZero: clientFirst = 1; clientLast = 1; break;
+                default:                      clientFirst = -1; clientLast = -1; break;
+            }
+
+            if (isHost)
+            {
+                for (int i = clientFirst; i <= clientLast; i++)
+                    DisableRobotInput(GetRobotLoaded(i));
+            }
+            else
+            {
+                var pads = Gamepad.all;
+                int clientPadIndex = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    var robot = GetRobotLoaded(i);
+                    if (robot == null) continue;
+                    bool isClientSlot = i >= clientFirst && i <= clientLast;
+                    if (!isClientSlot)
+                    {
+                        var rb = robot.GetComponent<Rigidbody>();
+                        if (rb != null) rb.isKinematic = true;
+                        DisableRobotInput(robot);
+                    }
+                    else
+                    {
+                        if (pads.Count > clientPadIndex)
+                            BindRobotToGamepad(robot, pads[clientPadIndex++], gamepadControlScheme);
+                        else if (Keyboard.current != null)
+                            BindRobotToKeyboard(robot, keyboardControlScheme);
+                    }
                 }
             }
         }
 
-        SetNetworkCameraLayout(isHost, mode);
+        SetNetworkCameraLayout(isHost, mode, localSlot);
     }
 
-    // Destroys the cameras for the remote side and stretches local cameras
-    // to fill the screen, giving each machine a single full-screen (or
-    // side-by-side in 2v2) view of only its own robots.
-    public void SetNetworkCameraLayout(bool isHost, Util.PlayMode mode)
+    // Destroys remote cameras and stretches local cameras to fill the screen.
+    // localSlot: which slot this machine controls. When >= 0, show only that slot's
+    // camera full-screen. When -1 (no lobby), use the legacy mode-range logic.
+    public void SetNetworkCameraLayout(bool isHost, Util.PlayMode mode, int localSlot = -1)
     {
+        if (localSlot >= 0)
+        {
+            // Per-machine layout: keep the camera for localSlot, destroy the others.
+            GameObject[] allCams = { _spawnedCamera1, _spawnedCamera2, _spawnedCamera3, _spawnedCamera4 };
+            for (int i = 0; i < 4; i++)
+            {
+                if (allCams[i] == null) continue;
+                if (i == localSlot)
+                {
+                    ConfigureCameraViewport(allCams[i], CameraSide.Full);
+                }
+                else
+                {
+                    Destroy(allCams[i]);
+                    switch (i)
+                    {
+                        case 0: _spawnedCamera1 = null; break;
+                        case 1: _spawnedCamera2 = null; break;
+                        case 2: _spawnedCamera3 = null; break;
+                        case 3: _spawnedCamera4 = null; break;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Legacy fallback: mode-based layout (used when LocalClientSlot is not set).
         if (mode == Util.PlayMode.OneVsOne)
         {
             if (isHost)
@@ -1221,7 +1289,6 @@ public class LoadMatch : MonoBehaviour
         }
         else if (mode == Util.PlayMode.TwoVsZero)
         {
-            // Host controls slot 0, client controls slot 1 — each gets a full-screen camera.
             if (isHost)
             {
                 ConfigureCameraViewport(_spawnedCamera1, CameraSide.Full);
