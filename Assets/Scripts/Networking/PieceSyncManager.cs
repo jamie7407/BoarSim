@@ -97,12 +97,7 @@ public class PieceSyncManager : NetworkBehaviour
             // the client joins, tanking FPS, starving the network thread, and making balls
             // explode when they contact the kinematic robot. Registration only maps IDs;
             // kinematic state must be set before the first FixedUpdate.
-            foreach (var piece in FindObjectsOfType<GamePiece>())
-            {
-                if (piece.rb == null) continue;
-                piece.rb.isKinematic   = true;
-                piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
-            }
+            MakeAllBallsKinematic();
             Debug.Log($"[Net][Client] PieceSyncManager spawned — made {FindObjectsOfType<GamePiece>().Length} balls kinematic");
 
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_REG,    OnRegistrationReceived);
@@ -110,6 +105,9 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DELETE, OnDeleteReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_ATTACH, OnPieceAttachReceived);
             NetworkManager.CustomMessagingManager.RegisterNamedMessageHandler(MSG_DETACH, OnPieceDetachReceived);
+
+            // Clear stale client state on match restart so new registration maps correctly.
+            GameNetworkManager.OnNetworkMatchStart += OnClientMatchStarted;
         }
     }
 
@@ -122,7 +120,61 @@ public class PieceSyncManager : NetworkBehaviour
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DELETE);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_ATTACH);
             NetworkManager.CustomMessagingManager.UnregisterNamedMessageHandler(MSG_DETACH);
+            GameNetworkManager.OnNetworkMatchStart -= OnClientMatchStarted;
         }
+    }
+
+    // Called on the client when the host broadcasts a new match start.
+    // Clears all stale per-match state so the incoming registration maps the new balls cleanly.
+    // Also re-kinematises all current GamePieces after a short delay — new field balls are
+    // dynamic by default and would run local physics for the 2.5s until registration arrives.
+    private void OnClientMatchStarted(MatchSettings _)
+    {
+        _clientMap.Clear();
+        _clientAttached.Clear();
+        _pendingAttaches.Clear();
+        _recvPos.Clear();
+        _recvVel.Clear();
+        _recvTime.Clear();
+        _recvRot.Clear();
+        _clientPieces = System.Array.Empty<GamePiece>();
+        StartCoroutine(MakeNewBallsKinematicAfterReset());
+    }
+
+    private IEnumerator MakeNewBallsKinematicAfterReset()
+    {
+        // Wait one frame to ensure ResetField() has destroyed old objects and spawned new ones.
+        yield return new WaitForEndOfFrame();
+        yield return new WaitForEndOfFrame();
+        MakeAllBallsKinematic();
+    }
+
+    private void MakeAllBallsKinematic()
+    {
+        foreach (var piece in FindObjectsOfType<GamePiece>())
+        {
+            if (piece.rb == null) continue;
+            piece.rb.isKinematic   = true;
+            piece.rb.interpolation = RigidbodyInterpolation.Interpolate;
+        }
+    }
+
+    // Called by GameNetworkManager.BroadcastMatchStart() so clients see new balls within
+    // ~2.5 seconds of a match restart instead of waiting up to 5s for RegistrationLoop.
+    public void TriggerEarlyRegistration(float delaySeconds = 2.5f)
+    {
+        if (!IsServer) return;
+        StartCoroutine(EarlyRegistrationCoroutine(delaySeconds));
+    }
+
+    private IEnumerator EarlyRegistrationCoroutine(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (!IsServer || NetworkManager.ConnectedClientsList.Count <= 1) yield break;
+        RefreshServerPieces();
+        SendRegistration();
+        SendDeletions();
+        SendAttachForStationary();
     }
 
     // ── Deterministic piece ordering ──────────────────────────────────────────
