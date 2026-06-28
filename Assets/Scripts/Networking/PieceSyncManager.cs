@@ -295,34 +295,20 @@ public class PieceSyncManager : NetworkBehaviour
             var vel   = _recvVel.TryGetValue(id, out var v) ? v : Vector3.zero;
             float spd = vel.magnitude;
 
-            // Dead-reckon the server position forward to now; add gravity for airborne balls.
-            Vector3 serverTarget;
-            if (spd > 0.5f && _recvTime.TryGetValue(id, out float t0))
+            // Dead-reckon for fast balls; lerp toward last-known position for slow ones.
+            // No gravity term — balls on the ground would be pulled below the floor.
+            Vector3 target;
+            if (spd > 1f && _recvTime.TryGetValue(id, out float t0))
             {
                 float dt = Mathf.Min(Time.fixedTime - t0, 0.2f);
-                serverTarget = kvp.Value + vel * dt + 0.5f * Physics.gravity * (dt * dt);
+                Vector3 serverTarget = kvp.Value + vel * dt;
+                // High-speed lerp: fast enough to track robot-contact balls without lag,
+                // smooth enough to suppress per-packet jitter (original hard-snap caused jitter).
+                target = Vector3.Lerp(piece.rb.position, serverTarget, 20f * Time.fixedDeltaTime);
             }
             else
             {
-                serverTarget = kvp.Value;
-            }
-
-            // Distance-weighted correction: skip micro-errors, soft-lerp small drifts, hard-snap large gaps.
-            float errSq = (serverTarget - piece.rb.position).sqrMagnitude;
-            Vector3 target;
-            if (errSq < 0.0002f)
-            {
-                if (_recvRot.TryGetValue(id, out var sr)) piece.rb.MoveRotation(sr);
-                continue;
-            }
-            else if (errSq < 0.09f)
-            {
-                float blend = Mathf.Lerp(6f, 16f, errSq / 0.09f) * Time.fixedDeltaTime;
-                target = Vector3.Lerp(piece.rb.position, serverTarget, blend);
-            }
-            else
-            {
-                target = serverTarget;
+                target = Vector3.Lerp(piece.rb.position, kvp.Value, 12f * Time.fixedDeltaTime);
             }
 
             piece.rb.MovePosition(target);

@@ -223,6 +223,20 @@ public class FMS : MonoBehaviour
         return previousMatchTimer >= targetTime && MatchTimer < targetTime;
     }
 
+    // Called from GameNetworkManager.LateUpdate() with the pre- and post-network-override
+    // timer values so crossings that the local-decrement CrossedTime missed are caught.
+    // (The network timer can jump by >1 frame's deltaTime, skipping over a threshold.)
+    public void CheckTimerCrossings(float prev, float cur)
+    {
+        float autoEndTime = matchTime - autoTime;
+        if (!playedAutoEnd && prev >= autoEndTime && cur < autoEndTime)
+        { PlaySound(End); playedAutoEnd = true; }
+        if (!playedEndgame && prev >= endgameTime && cur < endgameTime)
+        { PlaySound(Endgame); playedEndgame = true; }
+        if (!playedMatchEnd && prev >= 0f && cur < 0f)
+        { PlaySound(End); playedMatchEnd = true; }
+    }
+
     private void PlaySound(AudioClip clip)
     {
         if (IsMenuOpen())

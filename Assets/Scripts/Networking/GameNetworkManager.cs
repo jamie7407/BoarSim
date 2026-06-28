@@ -60,6 +60,7 @@ using PlayMode = Util.PlayMode;
         -1, NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
 
     private LoadMatch _loadMatch;
+    private FMS _fms;
     private Canvas _countdownCanvas;
     private TMP_Text _countdownLabel;
     private bool _countdownRunning;
@@ -252,13 +253,23 @@ using PlayMode = Util.PlayMode;
         {
             // Override whatever FMS.Update() set this frame with the host-authoritative values.
             // LateUpdate runs after Update, so this is the final value each frame.
-            // Without syncing MatchState/RobotState, both machines run independent state
-            // machines and auto/teleop/endgame transitions happen at different times.
-            FMS.MatchTimer        = _netMatchTimer.Value;
+            float prevTimer = FMS.MatchTimer;
+            float netTimer  = _netMatchTimer.Value;
+
+            FMS.MatchTimer        = netTimer;
             FMS.MatchState        = (MatchState)_netMatchState.Value;
             FMS.RobotState        = (RobotState)_netRobotState.Value;
             ScoreHolder.BlueScore = _netBlueScore.Value;
             ScoreHolder.RedScore  = _netRedScore.Value;
+
+            // The network timer can jump by more than one frame's deltaTime (network tick rate
+            // is lower than frame rate), skipping over a threshold that CrossedTime in
+            // FMS.Update() would have caught. Check explicitly with the actual transition values.
+            if (prevTimer != netTimer)
+            {
+                if (_fms == null) _fms = FindFirstObjectByType<FMS>();
+                _fms?.CheckTimerCrossings(prevTimer, netTimer);
+            }
         }
     }
 
@@ -755,9 +766,10 @@ using PlayMode = Util.PlayMode;
 
     private static (int first, int last) ClientSlots(PlayMode mode) => mode switch
     {
-        PlayMode.OneVsOne => (1, 1),
-        PlayMode.TwoVsTwo => (2, 3),
-        _                 => (-1, -1)
+        PlayMode.OneVsOne  => (1, 1),
+        PlayMode.TwoVsTwo  => (2, 3),
+        PlayMode.TwoVsZero => (1, 1),
+        _                  => (-1, -1)
     };
 
     // ── Host → Client: sync match settings and start the match ───────────────

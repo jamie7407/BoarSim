@@ -1142,6 +1142,7 @@ public class LoadMatch : MonoBehaviour
         {
             case Util.PlayMode.OneVsOne:  clientFirst = 1; clientLast = 1; break;
             case Util.PlayMode.TwoVsTwo:  clientFirst = 2; clientLast = 3; break;
+            case Util.PlayMode.TwoVsZero: clientFirst = 1; clientLast = 1; break;
             default:                      clientFirst = -1; clientLast = -1; break;
         }
 
@@ -1216,6 +1217,20 @@ public class LoadMatch : MonoBehaviour
                 ConfigureCameraViewport(_spawnedCamera4, CameraSide.Right);
                 if (_spawnedCamera1 != null) { Destroy(_spawnedCamera1); _spawnedCamera1 = null; }
                 if (_spawnedCamera2 != null) { Destroy(_spawnedCamera2); _spawnedCamera2 = null; }
+            }
+        }
+        else if (mode == Util.PlayMode.TwoVsZero)
+        {
+            // Host controls slot 0, client controls slot 1 — each gets a full-screen camera.
+            if (isHost)
+            {
+                ConfigureCameraViewport(_spawnedCamera1, CameraSide.Full);
+                if (_spawnedCamera2 != null) { Destroy(_spawnedCamera2); _spawnedCamera2 = null; }
+            }
+            else
+            {
+                ConfigureCameraViewport(_spawnedCamera2, CameraSide.Full);
+                if (_spawnedCamera1 != null) { Destroy(_spawnedCamera1); _spawnedCamera1 = null; }
             }
         }
     }
