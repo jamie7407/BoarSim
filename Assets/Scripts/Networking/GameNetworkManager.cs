@@ -100,9 +100,20 @@ using PlayMode = Util.PlayMode;
     // Per-slot component caches — built in ApplyRoleToLoadedMatch for both host and client.
     // Avoids GetComponentsInChildren in hot paths: AccumulateClientTriggeredInputs (every Update),
     // SendMechInputForSlot (25 Hz), and SendRobotActionsServerRpc (host, 25 Hz).
+    // Lazily rebuilt in SendMechInputForSlot if null (race: robot loaded after ApplyRole ran).
     private readonly JointController[][] _cachedJCs       = new JointController[4][];
     private readonly BuildNode[][]       _cachedBNs        = new BuildNode[4][];
     private readonly AutoAim[][]         _cachedAutoAims   = new AutoAim[4][];
+
+    // Client-side dead-reckoning: extrapolate root + joints in LateUpdate every render frame.
+    // Eliminates visual lag caused by 50 Hz physics teleports — joints now track root rigidly.
+    private readonly Vector3[]    _rootRecvPos  = new Vector3[4];
+    private readonly Quaternion[] _rootRecvRot  = new Quaternion[4];
+    private readonly Vector3[]    _rootRecvVel  = new Vector3[4];
+    private readonly float[]      _rootRecvTime = new float[4];
+    private readonly bool[]       _rootHasRecv  = new bool[4];
+    // Joint local offsets relative to root at receive time (index matches _cachedJointRbs[slot]).
+    private readonly (Vector3 lp, Quaternion lr)[][] _jointLocal = new (Vector3, Quaternion)[4][];
 
     // Host-side send cache: same data, rebuilt on SetupVersion change.
     // Eliminates GetComponentsInChildren calls at 50 Hz from SendJointSync.
@@ -299,6 +310,44 @@ using PlayMode = Util.PlayMode;
                 if (_fms == null) _fms = FindFirstObjectByType<FMS>();
                 _fms?.CheckTimerCrossings(prevTimer, netTimer);
             }
+
+            // Dead-reckoning: extrapolate all robot transforms forward from the last received
+            // position using the velocity estimated between the two most recent sync packets.
+            // With rb.interpolation=None, we own the visual transform each render frame —
+            // this eliminates the ~20 ms physics-tick stutter and hides relay RTT for
+            // constant-velocity movement (the common driving case).
+            if (_loadMatch != null)
+            {
+                for (int slot = 0; slot < 4; slot++)
+                {
+                    if (!_rootHasRecv[slot]) continue;
+                    var robot = _loadMatch.GetRobotLoaded(slot);
+                    if (robot == null) continue;
+
+                    // Cap extrapolation at 150 ms to prevent wild overshoots on packet loss.
+                    float dt = Mathf.Min(Time.time - _rootRecvTime[slot], 0.15f);
+                    Vector3    predPos = _rootRecvPos[slot] + _rootRecvVel[slot] * dt;
+                    Quaternion predRot = _rootRecvRot[slot];
+
+                    robot.transform.SetPositionAndRotation(predPos, predRot);
+
+                    // Recompute joint transforms from the extrapolated root so mechanisms
+                    // track the chassis rigidly between packets instead of floating behind.
+                    var offsets  = _jointLocal[slot];
+                    var jointRbs = _cachedJointRbs[slot];
+                    if (offsets != null && jointRbs != null)
+                    {
+                        int len = Mathf.Min(offsets.Length, jointRbs.Length);
+                        for (int j = 0; j < len; j++)
+                        {
+                            if (jointRbs[j] == null) continue;
+                            jointRbs[j].transform.SetPositionAndRotation(
+                                predPos + predRot * offsets[j].lp,
+                                predRot * offsets[j].lr);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -342,7 +391,7 @@ using PlayMode = Util.PlayMode;
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
+                rb.interpolation = RigidbodyInterpolation.None;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -375,7 +424,7 @@ using PlayMode = Util.PlayMode;
                 if (rb == rootRb) continue;
                 if (rb.GetComponent<GamePiece>() != null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.Interpolate;
+                rb.interpolation = RigidbodyInterpolation.None;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }
@@ -421,6 +470,13 @@ using PlayMode = Util.PlayMode;
         if (_loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
+
+        if (_cachedJCs[slot] == null)
+        {
+            _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
+            _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
+            _cachedAutoAims[slot] = robot.GetComponentsInChildren<AutoAim>();
+        }
 
         var jcs      = _cachedJCs[slot];
         var bns      = _cachedBNs[slot];
@@ -579,7 +635,7 @@ using PlayMode = Util.PlayMode;
             reader.ReadValueSafe(out ushort rpx); reader.ReadValueSafe(out ushort rpy); reader.ReadValueSafe(out ushort rpz);
             reader.ReadValueSafe(out ushort rqx); reader.ReadValueSafe(out ushort rqy); reader.ReadValueSafe(out ushort rqz); reader.ReadValueSafe(out ushort rqw);
             var rootPos = new Vector3(Mathf.HalfToFloat(rpx), Mathf.HalfToFloat(rpy), Mathf.HalfToFloat(rpz));
-            var rootRot = new Quaternion(Mathf.HalfToFloat(rqx), Mathf.HalfToFloat(rqy), Mathf.HalfToFloat(rqz), Mathf.HalfToFloat(rqw));
+            var rootRot = Quaternion.Normalize(new Quaternion(Mathf.HalfToFloat(rqx), Mathf.HalfToFloat(rqy), Mathf.HalfToFloat(rqz), Mathf.HalfToFloat(rqw)));
 
             reader.ReadValueSafe(out byte jointCount);
 
@@ -592,6 +648,24 @@ using PlayMode = Util.PlayMode;
             // of displacement in 1 step → N× implied velocity → ball-pile explosion.
             if (rootRb != null)
                 _kinematicTargets[rootRb] = (rootPos, rootRot);
+
+            // Dead-reckoning: estimate velocity from successive packets so LateUpdate can
+            // extrapolate the visual position forward each render frame.
+            float now = Time.time;
+            if (_rootHasRecv[slot])
+            {
+                float dt = now - _rootRecvTime[slot];
+                if (dt > 0.001f)
+                    _rootRecvVel[slot] = (rootPos - _rootRecvPos[slot]) / dt;
+            }
+            else
+            {
+                _rootRecvVel[slot] = Vector3.zero;
+            }
+            _rootRecvPos[slot]  = rootPos;
+            _rootRecvRot[slot]  = rootRot;
+            _rootRecvTime[slot] = now;
+            _rootHasRecv[slot]  = true;
 
             // Use cached filtered joint list — GetComponentsInChildren called 50×/sec otherwise.
             // Cache is invalidated when SetupVersion changes (robot swapped or field reset).
@@ -616,7 +690,7 @@ using PlayMode = Util.PlayMode;
                         if (!rb.isKinematic)
                         {
                             rb.isKinematic = true;
-                            rb.interpolation = RigidbodyInterpolation.Interpolate;
+                            rb.interpolation = RigidbodyInterpolation.None;
                             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
                         }
                         fbuf.Add(rb);
@@ -640,8 +714,15 @@ using PlayMode = Util.PlayMode;
                 if (rb == null) continue;
 
                 var worldPos = new Vector3(Mathf.HalfToFloat(px), Mathf.HalfToFloat(py), Mathf.HalfToFloat(pz));
-                var worldRot = new Quaternion(Mathf.HalfToFloat(qx), Mathf.HalfToFloat(qy), Mathf.HalfToFloat(qz), Mathf.HalfToFloat(qw));
+                var worldRot = Quaternion.Normalize(new Quaternion(Mathf.HalfToFloat(qx), Mathf.HalfToFloat(qy), Mathf.HalfToFloat(qz), Mathf.HalfToFloat(qw)));
                 _kinematicTargets[rb] = (worldPos, worldRot);
+
+                // Store joint position as a local offset from root so LateUpdate can
+                // recompute it relative to the extrapolated root each render frame.
+                if (_jointLocal[slot] == null || _jointLocal[slot].Length != filtered.Length)
+                    _jointLocal[slot] = new (Vector3, Quaternion)[filtered.Length];
+                Quaternion invRoot = Quaternion.Inverse(rootRot);
+                _jointLocal[slot][j] = (invRoot * (worldPos - rootPos), invRoot * worldRot);
             }
         }
     }
@@ -710,6 +791,14 @@ using PlayMode = Util.PlayMode;
 
         var actionMap = pi.actions.FindActionMap("Robot");
         if (actionMap == null) return;
+
+        // Lazy rebuild: ApplyRoleToLoadedMatch may have run before this slot's robot was ready.
+        if (_cachedJCs[slot] == null)
+        {
+            _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
+            _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
+            _cachedAutoAims[slot] = robot.GetComponentsInChildren<AutoAim>();
+        }
 
         var jcs      = _cachedJCs[slot];
         var bns      = _cachedBNs[slot];
