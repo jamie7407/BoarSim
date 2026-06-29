@@ -264,6 +264,14 @@ using PlayMode = Util.PlayMode;
 
             int bit = 0;
 
+            // Rebuild if null or empty (BuildArm.Start adds JCs at runtime)
+            if (_cachedJCs[slot] == null || _cachedJCs[slot].Length == 0)
+            {
+                _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
+                _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
+                _cachedAutoAims[slot] = robot.GetComponentsInChildren<AutoAim>();
+            }
+
             var jcs = _cachedJCs[slot];
             if (jcs != null) foreach (var jc in jcs)
             {
@@ -416,6 +424,16 @@ using PlayMode = Util.PlayMode;
                         foreach (var pc in gp.GetComponentsInChildren<Collider>())
                             foreach (var rc in robotCols)
                                 Physics.IgnoreCollision(rc, pc, true);
+
+                    // Kinematic child joints connected to the non-kinematic prediction root
+                    // would apply joint drive reaction forces to the root instead of moving
+                    // the arm (kinematic bodies can't move). Null the connectedBody so drives
+                    // are referenced to world space and don't pull the root around.
+                    // Visual positions are driven by MSG_JOINT_SYNC → LateUpdate regardless.
+                    var rootRb = predRobot.GetComponent<Rigidbody>();
+                    foreach (var joint in predRobot.GetComponentsInChildren<ConfigurableJoint>())
+                        if (joint.connectedBody == rootRb)
+                            joint.connectedBody = null;
                 }
             }
         }
@@ -496,7 +514,9 @@ using PlayMode = Util.PlayMode;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
 
-        if (_cachedJCs[slot] == null)
+        // Rebuild cache if null OR empty: BuildArm.Start() adds JointControllers at runtime
+        // so the cache can be populated as an empty array before Start() runs.
+        if (_cachedJCs[slot] == null || _cachedJCs[slot].Length == 0)
         {
             _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
             _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
@@ -878,8 +898,9 @@ using PlayMode = Util.PlayMode;
         var actionMap = pi.actions.FindActionMap("Robot");
         if (actionMap == null) return;
 
-        // Lazy rebuild: ApplyRoleToLoadedMatch may have run before this slot's robot was ready.
-        if (_cachedJCs[slot] == null)
+        // Rebuild if null OR empty: BuildArm.Start() adds JointControllers at runtime,
+        // so the cache can be populated as an empty array before Start() runs.
+        if (_cachedJCs[slot] == null || _cachedJCs[slot].Length == 0)
         {
             _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
             _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
