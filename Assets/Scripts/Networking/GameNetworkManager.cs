@@ -487,7 +487,10 @@ using PlayMode = Util.PlayMode;
     private static void KinematicMove(Rigidbody rb, Vector3 pos, Quaternion rot)
     {
         rb.position = pos;
-        rb.rotation = rot;
+        // Normalize before assigning: half-precision float16 loses enough mantissa bits
+        // that the reconstructed quaternion is no longer exactly unit-length, causing
+        // Unity to reject it with "Rotation quaternions must be unit length" every FixedUpdate.
+        rb.rotation = Quaternion.Normalize(rot);
     }
 
     // Packs all non-root, non-GamePiece child Rigidbody positions for all loaded robots
