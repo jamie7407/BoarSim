@@ -105,8 +105,8 @@ using PlayMode = Util.PlayMode;
     private readonly BuildNode[][]       _cachedBNs        = new BuildNode[4][];
     private readonly AutoAim[][]         _cachedAutoAims   = new AutoAim[4][];
 
-    // Client-side dead-reckoning: extrapolate root + joints in LateUpdate every render frame.
-    // Eliminates visual lag caused by 50 Hz physics teleports — joints now track root rigidly.
+    // Client-side dead-reckoning: velocity estimated from successive joint sync packets, used
+    // to restore velocity on a hard prediction snap and to compute joint LateUpdate offsets.
     private readonly Vector3[]    _rootRecvPos  = new Vector3[4];
     private readonly Quaternion[] _rootRecvRot  = new Quaternion[4];
     private readonly Vector3[]    _rootRecvVel  = new Vector3[4];
@@ -114,6 +114,15 @@ using PlayMode = Util.PlayMode;
     private readonly bool[]       _rootHasRecv  = new bool[4];
     // Joint local offsets relative to root at receive time (index matches _cachedJointRbs[slot]).
     private readonly (Vector3 lp, Quaternion lr)[][] _jointLocal = new (Vector3, Quaternion)[4][];
+
+    // Client-side prediction reconciliation.
+    // The client's own slot runs non-kinematic local physics so SwerveController forces take
+    // effect immediately (zero input lag). Each joint sync packet stores the host-authoritative
+    // root position here; FixedUpdate applies a soft position correction to prevent the local
+    // simulation from drifting too far from the authoritative state.
+    private readonly Vector3[]    _authPredPos  = new Vector3[4];
+    private readonly Quaternion[] _authPredRot  = new Quaternion[4];
+    private readonly bool[]       _hasPredAuth  = new bool[4];
 
     // Host-side send cache: same data, rebuilt on SetupVersion change.
     // Eliminates GetComponentsInChildren calls at 50 Hz from SendJointSync.
@@ -374,20 +383,40 @@ using PlayMode = Util.PlayMode;
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
             MakeChildRigidbodiesKinematic();
 
-            // Host is authoritative for ALL robot physics. Make every root Rigidbody
-            // kinematic so MSG_JOINT_SYNC drives it via rb.position= each FixedUpdate.
-            // Keep Interpolate so Unity smooths the visual transform between physics ticks —
-            // LateUpdate reads robot.transform.position (already interpolated) to reconstruct
-            // joint world positions, keeping mechanisms glued to the chassis every render frame.
+            // Root Rigidbodies: client's own slot is NON-kinematic so SwerveController forces
+            // take effect locally (zero input lag prediction). All other slots are kinematic —
+            // driven by MSG_JOINT_SYNC each FixedUpdate. All use Interpolate so robot.transform
+            // is smooth between physics ticks (LateUpdate reads it for joint offset reconstruction).
+            System.Array.Clear(_hasPredAuth, 0, _hasPredAuth.Length); // discard stale auth from prev match
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
                 if (robot == null) continue;
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
-                rb.isKinematic = true;
+                bool ownSlot = (LocalClientSlot >= 0 && slot == LocalClientSlot);
+                rb.isKinematic = !ownSlot;   // own slot: local physics drives it
                 rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+            }
+
+            // The prediction robot (non-kinematic) must not collide with kinematic balls.
+            // On the host both robot and balls are non-kinematic (symmetric two-way collision).
+            // On the client balls are kinematic, so they would push the prediction robot off-course
+            // instead of moving — generating constant divergence from the authoritative state.
+            // Ignore all robot↔ball collider pairs so the host remains authoritative for
+            // game-piece interactions while the client robot predicts its own driving freely.
+            if (LocalClientSlot >= 0)
+            {
+                var predRobot = _loadMatch.GetRobotLoaded(LocalClientSlot);
+                if (predRobot != null)
+                {
+                    var robotCols = predRobot.GetComponentsInChildren<Collider>();
+                    foreach (var gp in FindObjectsByType<GamePiece>(FindObjectsSortMode.None))
+                        foreach (var pc in gp.GetComponentsInChildren<Collider>())
+                            foreach (var rc in robotCols)
+                                Physics.IgnoreCollision(rc, pc, true);
+                }
             }
         }
 
@@ -514,17 +543,66 @@ using PlayMode = Util.PlayMode;
 
     private void FixedUpdate()
     {
-        // Client: apply buffered kinematic teleport targets. Buffering in a dict means
-        // multiple packets arriving in the same EarlyUpdate are deduplicated — only the
-        // latest position per Rigidbody is applied.
-        if (IsClient && !IsHost && _kinematicTargets.Count > 0)
+        if (IsClient && !IsHost)
         {
-            foreach (var kvp in _kinematicTargets)
+            // ── Prediction reconciliation ─────────────────────────────────────
+            // The client's own slot runs non-kinematic local physics driven by local
+            // SwerveController input — providing zero-lag visual response. Each joint
+            // sync packet stores the host-authoritative position in _authPredPos/Rot.
+            // Here we apply a soft correction: small errors are left to the physics
+            // simulation to absorb; large errors are blended; catastrophic divergence
+            // is snapped with velocity restored from the last inter-packet estimate.
+            if (_loadMatch != null)
             {
-                if (kvp.Key == null || !kvp.Key.isKinematic) continue;
-                KinematicMove(kvp.Key, kvp.Value.pos, kvp.Value.rot);
+                for (int slot = 0; slot < 4; slot++)
+                {
+                    if (!_hasPredAuth[slot]) continue;
+                    _hasPredAuth[slot] = false;
+
+                    var robot = _loadMatch.GetRobotLoaded(slot);
+                    if (robot == null) continue;
+                    var rb = robot.GetComponent<Rigidbody>();
+                    if (rb == null || rb.isKinematic) continue;
+
+                    float posErr = Vector3.Distance(rb.position, _authPredPos[slot]);
+
+                    if (posErr > 2.0f)
+                    {
+                        // Hard snap: prediction diverged catastrophically (physics glitch, teleport, etc.)
+                        rb.position        = _authPredPos[slot];
+                        rb.rotation        = _authPredRot[slot];
+                        rb.velocity        = _rootRecvVel[slot]; // restore host-estimated velocity
+                        rb.angularVelocity = Vector3.zero;
+                    }
+                    else if (posErr > 0.06f)
+                    {
+                        // Soft blend: nudge position toward authority; leave velocity untouched
+                        // so the correction doesn't fight the player's current drive momentum.
+                        float blend = Mathf.Clamp01(posErr / 0.5f) * 0.25f;
+                        rb.position = Vector3.Lerp(rb.position, _authPredPos[slot], blend);
+
+                        // Blend yaw only when noticeably off; pitch/roll correct through physics.
+                        float yawErr = Mathf.Abs(Mathf.DeltaAngle(
+                            rb.rotation.eulerAngles.y, _authPredRot[slot].eulerAngles.y));
+                        if (yawErr > 8f)
+                            rb.rotation = Quaternion.Slerp(rb.rotation, _authPredRot[slot], blend);
+                    }
+                    // posErr < 6 cm: within noise floor — trust local prediction, no correction.
+                }
             }
-            _kinematicTargets.Clear();
+
+            // ── Kinematic teleport targets (all other robot slots) ────────────
+            // Multiple packets can batch in one EarlyUpdate; buffering deduplicates so only
+            // the latest position per Rigidbody is applied in the physics step.
+            if (_kinematicTargets.Count > 0)
+            {
+                foreach (var kvp in _kinematicTargets)
+                {
+                    if (kvp.Key == null || !kvp.Key.isKinematic) continue;
+                    KinematicMove(kvp.Key, kvp.Value.pos, kvp.Value.rot);
+                }
+                _kinematicTargets.Clear();
+            }
         }
 
         if (!IsServer) return;
@@ -642,8 +720,20 @@ using PlayMode = Util.PlayMode;
             // Calling it from EarlyUpdate means multiple packets batched before one FixedUpdate
             // each overwrite the target; only the last survives, but the sweep covers N ticks
             // of displacement in 1 step → N× implied velocity → ball-pile explosion.
+            //
+            // Prediction slot (non-kinematic own robot): store as reconciliation target instead
+            // of a kinematic teleport — FixedUpdate will apply a soft correction toward authority.
             if (rootRb != null)
-                _kinematicTargets[rootRb] = (rootPos, rootRot);
+            {
+                if (rootRb.isKinematic)
+                    _kinematicTargets[rootRb] = (rootPos, rootRot);
+                else
+                {
+                    _authPredPos[slot]  = rootPos;
+                    _authPredRot[slot]  = rootRot;
+                    _hasPredAuth[slot]  = true;
+                }
+            }
 
             // Dead-reckoning: estimate velocity from successive packets so LateUpdate can
             // extrapolate the visual position forward each render frame.
