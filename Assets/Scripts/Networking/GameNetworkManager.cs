@@ -33,9 +33,11 @@ using PlayMode = Util.PlayMode;
     // OptionsMenuController subscribes to apply host settings and start the match automatically.
     public static event Action<MatchSettings> OnNetworkMatchStart;
 
-    // Sync rate: broadcast every N FixedUpdate ticks (50 Hz / N).
-    // N=2 = 25 Hz; rb.position= teleport + Rigidbody.interpolation keeps visuals smooth.
-    private readonly int robotSyncEveryNFixed = 2;
+    // Joint sync rate: broadcast every N FixedUpdate ticks (50 Hz / N).
+    // N=1 = 50 Hz — halves the worst-case latency window vs 25 Hz.
+    private readonly int robotSyncEveryNFixed = 1;
+    // Mechanism input (reliable RPC) stays at 25 Hz regardless of joint sync rate.
+    private const int mechSyncEveryNFixed = 2;
 
     private const string MSG_JOINT_SYNC = "BoarSim.JointSync";
 
@@ -95,10 +97,12 @@ using PlayMode = Util.PlayMode;
     private readonly Rigidbody[][] _cachedJointRbs = new Rigidbody[4][];
     private int _jointCacheSetupVersion = -1;
 
-    // Per-slot JointController and BuildNode caches for AccumulateClientTriggeredInputs.
-    // Built once in ApplyRoleToLoadedMatch to avoid GetComponentsInChildren every Update frame.
-    private readonly JointController[][] _cachedClientJcs = new JointController[4][];
-    private readonly BuildNode[][]       _cachedClientBns = new BuildNode[4][];
+    // Per-slot component caches — built in ApplyRoleToLoadedMatch for both host and client.
+    // Avoids GetComponentsInChildren in hot paths: AccumulateClientTriggeredInputs (every Update),
+    // SendMechInputForSlot (25 Hz), and SendRobotActionsServerRpc (host, 25 Hz).
+    private readonly JointController[][] _cachedJCs       = new JointController[4][];
+    private readonly BuildNode[][]       _cachedBNs        = new BuildNode[4][];
+    private readonly AutoAim[][]         _cachedAutoAims   = new AutoAim[4][];
 
     // Host-side send cache: same data, rebuilt on SetupVersion change.
     // Eliminates GetComponentsInChildren calls at 50 Hz from SendJointSync.
@@ -240,7 +244,7 @@ using PlayMode = Util.PlayMode;
 
             int bit = 0;
 
-            var jcs = _cachedClientJcs[slot];
+            var jcs = _cachedJCs[slot];
             if (jcs != null) foreach (var jc in jcs)
             {
                 if (jc.setPoints == null) continue;
@@ -254,7 +258,7 @@ using PlayMode = Util.PlayMode;
                 }
             }
 
-            var bns = _cachedClientBns[slot];
+            var bns = _cachedBNs[slot];
             if (bns != null) foreach (var bn in bns)
             {
                 if (bn.Actions == null) continue;
@@ -325,15 +329,6 @@ using PlayMode = Util.PlayMode;
             var mode = (PlayMode)_loadMatch.GetSettingsCopy().playMode;
             _loadMatch.RebindForNetworkPlay(false, mode, LocalClientSlot);
 
-            // Cache JointControllers and BuildNodes so AccumulateClientTriggeredInputs
-            // doesn't call GetComponentsInChildren every Update frame.
-            for (int s = 0; s < 4; s++)
-            {
-                var r = _loadMatch.GetRobotLoaded(s);
-                _cachedClientJcs[s] = r?.GetComponentsInChildren<JointController>();
-                _cachedClientBns[s] = r?.GetComponentsInChildren<BuildNode>();
-            }
-
             // Make all child Rigidbodies kinematic on the client so the host-authoritative
             // joint sync (MSG_JOINT_SYNC) can drive them without fighting local physics.
             MakeChildRigidbodiesKinematic();
@@ -350,6 +345,16 @@ using PlayMode = Util.PlayMode;
                 rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
+        }
+
+        // Build per-slot component caches for both host and client.
+        // Shared by SendMechInputForSlot, SendRobotActionsServerRpc, and AccumulateClientTriggeredInputs.
+        for (int s = 0; s < 4; s++)
+        {
+            var r = _loadMatch.GetRobotLoaded(s);
+            _cachedJCs[s]       = r?.GetComponentsInChildren<JointController>();
+            _cachedBNs[s]       = r?.GetComponentsInChildren<BuildNode>();
+            _cachedAutoAims[s]  = r?.GetComponentsInChildren<AutoAim>();
         }
     }
 
@@ -417,24 +422,23 @@ using PlayMode = Util.PlayMode;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
 
-        var joints = robot.GetComponentsInChildren<JointController>();
+        var jcs      = _cachedJCs[slot];
+        var bns      = _cachedBNs[slot];
+        var autoAims = _cachedAutoAims[slot];
         int bit = 0;
-        foreach (var jc in joints)
+
+        if (jcs != null) foreach (var jc in jcs)
         {
             if (jc.setPoints == null) continue;
             for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
             {
                 bool trig = ((triggeredMask >> bit) & 1UL) != 0;
                 bool held = ((heldMask      >> bit) & 1UL) != 0;
-                // Always call SetNetworkInput so held=false clears the held state
-                // on the JointController when the button is released.
                 jc.SetNetworkInput(sp, trig, held);
             }
         }
 
-        // BuildNode actions — must use the same traversal order as SendMechInputForSlot.
-        var buildNodes = robot.GetComponentsInChildren<BuildNode>();
-        foreach (var bn in buildNodes)
+        if (bns != null) foreach (var bn in bns)
         {
             if (bn.Actions == null) continue;
             for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
@@ -445,9 +449,7 @@ using PlayMode = Util.PlayMode;
             }
         }
 
-        // AutoAim — one bit per component; held=true means the client's button is pressed.
-        var autoAims = robot.GetComponentsInChildren<AutoAim>();
-        foreach (var aa in autoAims)
+        if (autoAims != null) foreach (var aa in autoAims)
         {
             if (bit >= 64) break;
             bool held = ((heldMask >> bit) & 1UL) != 0;
@@ -668,8 +670,8 @@ using PlayMode = Util.PlayMode;
             for (int i = first; i <= last; i++)
                 SendDriveInputForSlot(i);
 
-            // Mechanisms throttled — reliable RPC, no need for 50 Hz.
-            if (++mechTick >= robotSyncEveryNFixed)
+            // Mechanisms throttled — reliable RPC, stays at 25 Hz regardless of joint sync rate.
+            if (++mechTick >= mechSyncEveryNFixed)
             {
                 mechTick = 0;
                 for (int i = first; i <= last; i++)
@@ -709,11 +711,14 @@ using PlayMode = Util.PlayMode;
         var actionMap = pi.actions.FindActionMap("Robot");
         if (actionMap == null) return;
 
-        var joints = robot.GetComponentsInChildren<JointController>();
+        var jcs      = _cachedJCs[slot];
+        var bns      = _cachedBNs[slot];
+        var autoAims = _cachedAutoAims[slot];
 
         ulong triggered = 0, held = 0;
         int bit = 0;
-        foreach (var jc in joints)
+
+        if (jcs != null) foreach (var jc in jcs)
         {
             if (jc.setPoints == null) continue;
             for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
@@ -732,9 +737,7 @@ using PlayMode = Util.PlayMode;
             }
         }
 
-        // BuildNode actions (intake, transfer, score, etc.)
-        var buildNodes = robot.GetComponentsInChildren<BuildNode>();
-        foreach (var bn in buildNodes)
+        if (bns != null) foreach (var bn in bns)
         {
             if (bn.Actions == null) continue;
             for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
@@ -742,7 +745,7 @@ using PlayMode = Util.PlayMode;
                 var action = bn.Actions[a];
                 if (!action.InputRequired)
                 {
-                    held |= 1UL << bit; // AlwaysPerform — always held
+                    held |= 1UL << bit;
                     continue;
                 }
                 var ca = actionMap.FindAction(action.ControllerButton.ToString());
@@ -751,16 +754,13 @@ using PlayMode = Util.PlayMode;
                 bool h = (ca?.IsPressed() ?? false) || (ka?.IsPressed() ?? false);
 
                 bn.SetNetworkInput(a, t, h);
-                
+
                 if (t) triggered |= 1UL << bit;
                 if (h) held      |= 1UL << bit;
             }
         }
 
-        // AutoAim — one bit per component: forward the local button-held state so the
-        // host can activate its own PID loop even with PlayerInput disabled for P2.
-        var autoAims = robot.GetComponentsInChildren<AutoAim>();
-        foreach (var aa in autoAims)
+        if (autoAims != null) foreach (var aa in autoAims)
         {
             if (bit >= 64) break;
             if (aa.GetButtonHeld()) held |= 1UL << bit;
