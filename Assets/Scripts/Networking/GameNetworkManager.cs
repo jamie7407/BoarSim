@@ -444,10 +444,11 @@ using PlayMode = Util.PlayMode;
             // Mirrors SwerveController.FixedUpdate's field-centric path so P2 gets the same
             // driving feel as P1: forward on the stick always moves toward the far wall.
             // driveInput matches SwerveController's construction from the translate action.
+            // Project forward onto XZ (ignoring pitch/roll) to avoid gimbal-lock yaw jumps on bumps.
             Vector3 driveInput = new Vector3(ty, 0f, tx);
-            float angle = swerve.isRed
-                ? robot.transform.localRotation.eulerAngles.y + 90f
-                : robot.transform.localRotation.eulerAngles.y + 270f;
+            Vector3 flatFwd = robot.transform.forward; flatFwd.y = 0f;
+            float yawDeg = Mathf.Atan2(flatFwd.x, flatFwd.z) * Mathf.Rad2Deg;
+            float angle = swerve.isRed ? yawDeg + 90f : yawDeg + 270f;
             Vector3 fr = Quaternion.AngleAxis(angle, Vector3.up) * driveInput;
             // SetNetworkDrive(x, y, r) → _translateValue=(x,y) → driveInput=(y,0,x) → fwd=y, str=x
             ndx = fr.z; ndy = fr.x;

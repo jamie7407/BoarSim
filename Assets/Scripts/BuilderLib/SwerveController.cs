@@ -185,15 +185,11 @@ public class SwerveController : MonoBehaviour
         //rotate input to match alliance and scheme
         Vector3 driveInput = new Vector3(_translateValue.y, 0, _translateValue.x);
 
-        float angle;
-        if (!isRed)
-        {
-            angle = transform.localRotation.eulerAngles.y + 270;
-        }
-        else
-        {
-            angle = transform.localRotation.eulerAngles.y + 90;
-        }
+        // Project forward onto XZ to get the true horizontal yaw, unaffected by
+        // pitch/roll from bumps. eulerAngles.y is unreliable when the robot tilts.
+        Vector3 flatFwd = transform.forward; flatFwd.y = 0f;
+        float yawDeg = Mathf.Atan2(flatFwd.x, flatFwd.z) * Mathf.Rad2Deg;
+        float angle = isRed ? yawDeg + 90f : yawDeg + 270f;
 
         Vector3 fieldRelativeAngle = Quaternion.AngleAxis(angle, Vector3.up) * driveInput;
 
