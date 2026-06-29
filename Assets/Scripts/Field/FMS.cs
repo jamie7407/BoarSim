@@ -75,8 +75,8 @@ public class FMS : MonoBehaviour
             AutoTimeRemaining = Mathf.Max(0f, MatchTimer - (matchTime - autoTime));
         }
 
-        UpdateMatchState();
         HandleSounds();
+        UpdateMatchState();
 
         previousMatchState = MatchState;
 
@@ -138,6 +138,16 @@ public class FMS : MonoBehaviour
             playedAutoEnd = true;
         }
 
+        // Fire 3 bells the moment the match state transitions out of auto (either to teleop
+        // or endgame). Running this before UpdateMatchState means the timer hasn't been reset
+        // by AutoToTeleopPause yet, so CrossedTime(autoEndTime) above fires correctly first.
+        if (!playedBeginTeleop && previousMatchState == MatchState.auto && MatchState != MatchState.auto)
+        {
+            PlaySound(BeginTeleop);
+            playedBeginTeleop = true;
+            teleopStartMatchTimer = MatchTimer;
+        }
+
         if (playedBeginTeleop)
         {
             float shift10Time = teleopStartMatchTimer - 9f;
@@ -196,14 +206,6 @@ public class FMS : MonoBehaviour
 
         MatchState = MatchState.teleop;
         RobotState = RobotState.enabled;
-
-        teleopStartMatchTimer = MatchTimer;
-
-        if (!playedBeginTeleop)
-        {
-            PlaySound(BeginTeleop);
-            playedBeginTeleop = true;
-        }
     }
 
     private IEnumerator MatchEndPause()

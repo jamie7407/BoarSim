@@ -311,40 +311,32 @@ using PlayMode = Util.PlayMode;
                 _fms?.CheckTimerCrossings(prevTimer, netTimer);
             }
 
-            // Dead-reckoning: extrapolate all robot transforms forward from the last received
-            // position using the velocity estimated between the two most recent sync packets.
-            // With rb.interpolation=None, we own the visual transform each render frame —
-            // this eliminates the ~20 ms physics-tick stutter and hides relay RTT for
-            // constant-velocity movement (the common driving case).
+            // Joint smoothing: the root rb uses Rigidbody.Interpolate so Unity already
+            // produces a smooth visual transform between physics ticks. We read that
+            // interpolated transform as the base and reconstruct each joint's world position
+            // from its stored local offset, keeping mechanisms glued to the chassis every
+            // render frame instead of snapping at 50 Hz physics intervals.
             if (_loadMatch != null)
             {
                 for (int slot = 0; slot < 4; slot++)
                 {
-                    if (!_rootHasRecv[slot]) continue;
+                    var offsets = _jointLocal[slot];
+                    if (offsets == null) continue;
                     var robot = _loadMatch.GetRobotLoaded(slot);
                     if (robot == null) continue;
 
-                    // Cap extrapolation at 150 ms to prevent wild overshoots on packet loss.
-                    float dt = Mathf.Min(Time.time - _rootRecvTime[slot], 0.15f);
-                    Vector3    predPos = _rootRecvPos[slot] + _rootRecvVel[slot] * dt;
-                    Quaternion predRot = _rootRecvRot[slot];
+                    Vector3    rootPos = robot.transform.position;
+                    Quaternion rootRot = robot.transform.rotation;
 
-                    robot.transform.SetPositionAndRotation(predPos, predRot);
-
-                    // Recompute joint transforms from the extrapolated root so mechanisms
-                    // track the chassis rigidly between packets instead of floating behind.
-                    var offsets  = _jointLocal[slot];
                     var jointRbs = _cachedJointRbs[slot];
-                    if (offsets != null && jointRbs != null)
+                    if (jointRbs == null) continue;
+                    int len = Mathf.Min(offsets.Length, jointRbs.Length);
+                    for (int j = 0; j < len; j++)
                     {
-                        int len = Mathf.Min(offsets.Length, jointRbs.Length);
-                        for (int j = 0; j < len; j++)
-                        {
-                            if (jointRbs[j] == null) continue;
-                            jointRbs[j].transform.SetPositionAndRotation(
-                                predPos + predRot * offsets[j].lp,
-                                predRot * offsets[j].lr);
-                        }
+                        if (jointRbs[j] == null) continue;
+                        jointRbs[j].transform.SetPositionAndRotation(
+                            rootPos + rootRot * offsets[j].lp,
+                            rootRot * offsets[j].lr);
                     }
                 }
             }
@@ -384,6 +376,9 @@ using PlayMode = Util.PlayMode;
 
             // Host is authoritative for ALL robot physics. Make every root Rigidbody
             // kinematic so MSG_JOINT_SYNC drives it via rb.position= each FixedUpdate.
+            // Keep Interpolate so Unity smooths the visual transform between physics ticks —
+            // LateUpdate reads robot.transform.position (already interpolated) to reconstruct
+            // joint world positions, keeping mechanisms glued to the chassis every render frame.
             for (int slot = 0; slot < 4; slot++)
             {
                 var robot = _loadMatch.GetRobotLoaded(slot);
@@ -391,7 +386,7 @@ using PlayMode = Util.PlayMode;
                 var rb = robot.GetComponent<Rigidbody>();
                 if (rb == null) continue;
                 rb.isKinematic = true;
-                rb.interpolation = RigidbodyInterpolation.None;
+                rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
             }
         }

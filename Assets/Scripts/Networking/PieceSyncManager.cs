@@ -173,6 +173,12 @@ public class PieceSyncManager : NetworkBehaviour
         if (!IsServer || NetworkManager.ConnectedClientsList.Count <= 1) yield break;
         RefreshServerPieces();
         SendRegistration();
+        // Clear the sent-position cache so the next delta tick sends all ball positions,
+        // including sleeping balls whose positions appear "unchanged" relative to the cache.
+        // Without this, clients that just cleared _recvPos on match restart never receive
+        // a delta for settled balls and they stay stuck at end-of-previous-match positions.
+        _lastSentPos.Clear();
+        _lastSentRot.Clear();
         SendDeletions();
         SendAttachForStationary();
     }
