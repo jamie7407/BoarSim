@@ -85,15 +85,28 @@ public class AutoAim : MonoBehaviour
 
     public void SetNetworkActivate(bool active) { _netActive = active; }
 
+    // Resolved once — FindAction(enum.ToString()) allocates two strings per call otherwise
+    // (GetButtonHeld polls at 25 Hz, CheckButtonCondition every FixedUpdate).
+    private InputAction _ctrlAction;
+    private InputAction _kbAction;
+    private bool _actionsResolved;
+
+    private void EnsureActionCache()
+    {
+        if (_actionsResolved || _inputMap == null) return;
+        _ctrlAction = _inputMap.FindAction(controllerButton.ToString());
+        _kbAction   = _inputMap.FindAction(keyboardButton.ToString());
+        _actionsResolved = true;
+    }
+
     // Returns whether the local activation button is held — used by GameNetworkManager
     // to forward button state to the host via the mechanism bitmask.
     public bool GetButtonHeld()
     {
         if (targetWhen != AimAtWhen.WhenPressing || _inputMap == null) return false;
-        var ca = _inputMap.FindAction(controllerButton.ToString());
-        var ka = _inputMap.FindAction(keyboardButton.ToString());
-        bool ch = ca != null && ca.IsPressed() && ca.activeControl?.device is Gamepad;
-        bool kh = ka != null && ka.IsPressed() && ka.activeControl?.device is Keyboard;
+        EnsureActionCache();
+        bool ch = _ctrlAction != null && _ctrlAction.IsPressed() && _ctrlAction.activeControl?.device is Gamepad;
+        bool kh = _kbAction != null && _kbAction.IsPressed() && _kbAction.activeControl?.device is Keyboard;
         return ch || kh;
     }
     
@@ -234,16 +247,15 @@ public class AutoAim : MonoBehaviour
         if (_netActive) return true; // forwarded from client when PlayerInput is disabled
         if (_inputMap == null) return false;
 
-        var controllerAction = _inputMap.FindAction(controllerButton.ToString());
-        var keyboardAction = _inputMap.FindAction(keyboardButton.ToString());
+        EnsureActionCache();
 
-        var controllerHeld = controllerAction != null &&
-                            controllerAction.IsPressed() &&
-                            (controllerAction.activeControl?.device is Gamepad);
+        var controllerHeld = _ctrlAction != null &&
+                            _ctrlAction.IsPressed() &&
+                            (_ctrlAction.activeControl?.device is Gamepad);
 
-        var keyboardHeld = keyboardAction != null &&
-                          keyboardAction.IsPressed() &&
-                          (keyboardAction.activeControl?.device is Keyboard);
+        var keyboardHeld = _kbAction != null &&
+                          _kbAction.IsPressed() &&
+                          (_kbAction.activeControl?.device is Keyboard);
 
         return controllerHeld || keyboardHeld;
     }

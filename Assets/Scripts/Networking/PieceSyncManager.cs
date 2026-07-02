@@ -189,11 +189,38 @@ public class PieceSyncManager : NetworkBehaviour
     // Two transforms on any two machines running the same scene will produce identical keys
     // for the same object, because Unity's scene load preserves sibling order.
     // Zero-padded to 5 digits so lexicographic sort == numeric sort at each level.
+    private static readonly System.Text.StringBuilder _keySb = new(64);
+    private static readonly List<int> _keyIndices = new(16);
+
     private static string HierarchyKey(Transform t)
     {
-        var parts = new List<string>();
-        while (t != null) { parts.Insert(0, t.GetSiblingIndex().ToString("D5")); t = t.parent; }
-        return string.Join("/", parts);
+        _keyIndices.Clear();
+        while (t != null) { _keyIndices.Add(t.GetSiblingIndex()); t = t.parent; }
+
+        _keySb.Clear();
+        for (int i = _keyIndices.Count - 1; i >= 0; i--)
+        {
+            int v = _keyIndices[i];
+            _keySb.Append((char)('0' + v / 10000 % 10));
+            _keySb.Append((char)('0' + v / 1000  % 10));
+            _keySb.Append((char)('0' + v / 100   % 10));
+            _keySb.Append((char)('0' + v / 10    % 10));
+            _keySb.Append((char)('0' + v         % 10));
+            if (i > 0) _keySb.Append('/');
+        }
+        return _keySb.ToString();
+    }
+
+    // Decorate-sort-undecorate: computes each piece's key exactly once instead of twice per
+    // comparison inside Array.Sort (~2·n·log n key builds for 500 pieces was a GC spike every
+    // registration). Ordinal comparison keeps the order identical on host and client; nulls
+    // sort last (U+FFFF > any digit or '/').
+    private static void SortPiecesByHierarchyKey(GamePiece[] pieces)
+    {
+        var keys = new string[pieces.Length];
+        for (int i = 0; i < pieces.Length; i++)
+            keys[i] = pieces[i] != null ? HierarchyKey(pieces[i].transform) : "\uFFFF";
+        System.Array.Sort(keys, pieces, System.StringComparer.Ordinal);
     }
 
     // ── Server: registration ──────────────────────────────────────────────────
@@ -229,14 +256,7 @@ public class PieceSyncManager : NetworkBehaviour
         // Sort by deterministic hierarchy key before assigning IDs so that the client,
         // which sorts its own pieces by the same key, gets the same ordering and can
         // match server_entries[i] → client_sorted[i] without any proximity math.
-        System.Array.Sort(_serverPieces, (a, b) =>
-        {
-            if (a == null && b == null) return  0;
-            if (a == null)             return  1;
-            if (b == null)             return -1;
-            return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
-                                  System.StringComparison.Ordinal);
-        });
+        SortPiecesByHierarchyKey(_serverPieces);
 
         var found = new HashSet<GamePiece>(_serverPieces);
 
@@ -544,14 +564,7 @@ public class PieceSyncManager : NetworkBehaviour
         if (startOffset == 0)
         {
             _clientPieces = FindObjectsOfType<GamePiece>();
-            System.Array.Sort(_clientPieces, (a, b) =>
-            {
-                if (a == null && b == null) return  0;
-                if (a == null)             return  1;
-                if (b == null)             return -1;
-                return string.Compare(HierarchyKey(a.transform), HierarchyKey(b.transform),
-                                      System.StringComparison.Ordinal);
-            });
+            SortPiecesByHierarchyKey(_clientPieces);
         }
 
         if (_clientPieces == null) return; // chunk 0 hasn't arrived yet (shouldn't happen with Reliable)

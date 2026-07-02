@@ -105,6 +105,18 @@ using PlayMode = Util.PlayMode;
     private readonly BuildNode[][]       _cachedBNs        = new BuildNode[4][];
     private readonly AutoAim[][]         _cachedAutoAims   = new AutoAim[4][];
 
+    // Per-slot drive-input caches — avoids FindAction + GetComponent at 50 Hz.
+    // Keyed on the robot GameObject reference: a field reset spawns new robots,
+    // the reference changes, and the cache rebuilds automatically.
+    private readonly GameObject[]       _driveCacheRobot  = new GameObject[4];
+    private readonly InputAction[]      _driveLeftAction  = new InputAction[4];
+    private readonly InputAction[]      _driveRightAction = new InputAction[4];
+    private readonly SwerveController[] _driveSwerve      = new SwerveController[4];
+
+    // Root Rigidbody cache for the 50 Hz joint-sync receive path.
+    private readonly GameObject[] _rootRbCacheRobot = new GameObject[4];
+    private readonly Rigidbody[]  _cachedRootRbs    = new Rigidbody[4];
+
     // Client-side dead-reckoning: velocity estimated from successive joint sync packets, used
     // to restore velocity on a hard prediction snap and to compute joint LateUpdate offsets.
     private readonly Vector3[]    _rootRecvPos  = new Vector3[4];
@@ -135,7 +147,12 @@ using PlayMode = Util.PlayMode;
 
     private void Awake() { Instance = this; }
 
-    private void OnDestroy() { if (Instance == this) Instance = null; }
+    // Must override (not hide) so NetworkBehaviour's own destroy-time cleanup still runs.
+    public override void OnDestroy()
+    {
+        if (Instance == this) Instance = null;
+        base.OnDestroy();
+    }
 
     public override void OnNetworkSpawn()
     {
@@ -257,19 +274,20 @@ using PlayMode = Util.PlayMode;
         {
             var robot = _loadMatch.GetRobotLoaded(slot);
             if (robot == null) continue;
-            var pi = robot.GetComponent<PlayerInput>();
-            if (pi == null) continue;
-            var actionMap = pi.actions.FindActionMap("Robot");
-            if (actionMap == null) continue;
 
             int bit = 0;
 
-            // Rebuild if null or empty (BuildArm.Start adds JCs at runtime)
+            // Rebuild if null or empty (BuildArm.Start adds JCs at runtime).
+            // When the rebuild finally sees the runtime-created JCs, the runtime-created
+            // ConfigurableJoints exist too — disconnect them from the prediction root in
+            // case ApplyRoleToLoadedMatch ran before BuildArm.Start created them.
             if (_cachedJCs[slot] == null || _cachedJCs[slot].Length == 0)
             {
                 _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
                 _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
                 _cachedAutoAims[slot] = robot.GetComponentsInChildren<AutoAim>();
+                if (slot == LocalClientSlot && _cachedJCs[slot].Length > 0)
+                    DisconnectPredictionJoints(robot);
             }
 
             var jcs = _cachedJCs[slot];
@@ -278,10 +296,8 @@ using PlayMode = Util.PlayMode;
                 if (jc.setPoints == null) continue;
                 for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
                 {
-                    var spData = jc.setPoints[sp];
-                    var ca = actionMap.FindAction(spData.controllerButton.ToString());
-                    var ka = actionMap.FindAction(spData.keyboardButton.ToString());
-                    bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
+                    bool t = (jc.GetControllerAction(sp)?.triggered ?? false) ||
+                             (jc.GetKeyboardAction(sp)?.triggered ?? false);
                     if (t) _pendingClientTriggeredMask[slot] |= 1UL << bit;
                 }
             }
@@ -292,11 +308,9 @@ using PlayMode = Util.PlayMode;
                 if (bn.Actions == null) continue;
                 for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
                 {
-                    var act = bn.Actions[a];
-                    if (!act.InputRequired) continue;
-                    var ca = actionMap.FindAction(act.ControllerButton.ToString());
-                    var ka = actionMap.FindAction(act.KeyboardButton.ToString());
-                    bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
+                    if (!bn.Actions[a].InputRequired) continue;
+                    bool t = (bn.GetControllerAction(a)?.triggered ?? false) ||
+                             (bn.GetKeyboardAction(a)?.triggered ?? false);
                     if (t) _pendingClientTriggeredMask[slot] |= 1UL << bit;
                 }
             }
@@ -425,15 +439,11 @@ using PlayMode = Util.PlayMode;
                             foreach (var rc in robotCols)
                                 Physics.IgnoreCollision(rc, pc, true);
 
-                    // Kinematic child joints connected to the non-kinematic prediction root
-                    // would apply joint drive reaction forces to the root instead of moving
-                    // the arm (kinematic bodies can't move). Null the connectedBody so drives
-                    // are referenced to world space and don't pull the root around.
-                    // Visual positions are driven by MSG_JOINT_SYNC → LateUpdate regardless.
-                    var rootRb = predRobot.GetComponent<Rigidbody>();
-                    foreach (var joint in predRobot.GetComponentsInChildren<ConfigurableJoint>())
-                        if (joint.connectedBody == rootRb)
-                            joint.connectedBody = null;
+                    // Detach mechanism joints from the prediction root (see helper).
+                    // BuildArm/Buildelevator create joints in Start(), which may not have
+                    // run yet — the lazy JC-cache rebuild paths call this again once the
+                    // runtime components exist, so late joints are still disconnected.
+                    DisconnectPredictionJoints(predRobot);
                 }
             }
         }
@@ -447,6 +457,21 @@ using PlayMode = Util.PlayMode;
             _cachedBNs[s]       = r?.GetComponentsInChildren<BuildNode>();
             _cachedAutoAims[s]  = r?.GetComponentsInChildren<AutoAim>();
         }
+    }
+
+    // Kinematic child joints connected to the non-kinematic prediction root would apply
+    // joint drive reaction forces to the root instead of moving the arm (kinematic bodies
+    // can't move, so the connected body absorbs the force), destabilizing local driving.
+    // Null the connectedBody so drives are referenced to world space and don't pull the
+    // root around. Visual joint positions come from MSG_JOINT_SYNC → LateUpdate regardless.
+    // Safe to call repeatedly.
+    private void DisconnectPredictionJoints(GameObject predRobot)
+    {
+        var rootRb = predRobot.GetComponent<Rigidbody>();
+        if (rootRb == null) return;
+        foreach (var joint in predRobot.GetComponentsInChildren<ConfigurableJoint>())
+            if (joint.connectedBody == rootRb)
+                joint.connectedBody = null;
     }
 
     // Makes every non-root, non-GamePiece Rigidbody on every loaded robot kinematic.
@@ -581,7 +606,7 @@ using PlayMode = Util.PlayMode;
 
                     var robot = _loadMatch.GetRobotLoaded(slot);
                     if (robot == null) continue;
-                    var rb = robot.GetComponent<Rigidbody>();
+                    var rb = GetRootRb(slot, robot);
                     if (rb == null || rb.isKinematic) continue;
 
                     float posErr = Vector3.Distance(rb.position, _authPredPos[slot]);
@@ -636,6 +661,18 @@ using PlayMode = Util.PlayMode;
         SendJointSync();
     }
 
+    // Root Rigidbody lookup cached per robot instance — OnJointSyncReceived runs at 50 Hz.
+    private Rigidbody GetRootRb(int slot, GameObject robot)
+    {
+        if (robot == null) return null;
+        if (!ReferenceEquals(_rootRbCacheRobot[slot], robot))
+        {
+            _rootRbCacheRobot[slot] = robot;
+            _cachedRootRbs[slot]    = robot.GetComponent<Rigidbody>();
+        }
+        return _cachedRootRbs[slot];
+    }
+
     private static void KinematicMove(Rigidbody rb, Vector3 pos, Quaternion rot)
     {
         rb.position = pos;
@@ -655,6 +692,20 @@ using PlayMode = Util.PlayMode;
         int setupVer = _loadMatch.SetupVersion;
         if (setupVer != _sendCacheSetupVersion)
         {
+            // Mechanism Rigidbodies are created by BuildArm/Buildelevator in Start(), which
+            // runs AFTER this FixedUpdate for robots spawned last frame (pending Starts flush
+            // in the Update phase). Caching now would lock in an incomplete joint list and
+            // freeze those joints on clients for the rest of the match — defer until every
+            // robot with mechanisms has its runtime JointControllers.
+            for (int slot = 0; slot < 4; slot++)
+            {
+                var robot = _loadMatch.GetRobotLoaded(slot);
+                if (robot == null) continue;
+                if (robot.GetComponentsInChildren<BuildMechanism>().Length > 0 &&
+                    robot.GetComponentsInChildren<JointController>().Length == 0)
+                    return; // retry next tick; _sendCacheSetupVersion stays stale
+            }
+
             _sendCacheSetupVersion = setupVer;
             for (int slot = 0; slot < 4; slot++)
             {
@@ -734,7 +785,7 @@ using PlayMode = Util.PlayMode;
             reader.ReadValueSafe(out byte jointCount);
 
             var robot  = _loadMatch.GetRobotLoaded(slot);
-            var rootRb = robot != null ? robot.GetComponent<Rigidbody>() : null;
+            var rootRb = GetRootRb(slot, robot);
 
             // Buffer the target for FixedUpdate — do not call MovePosition here (EarlyUpdate).
             // Calling it from EarlyUpdate means multiple packets batched before one FixedUpdate
@@ -801,9 +852,19 @@ using PlayMode = Util.PlayMode;
                         }
                         fbuf.Add(rb);
                     }
-                    _cachedJointRbs[slot] = fbuf.ToArray();
+                    filtered = fbuf.ToArray();
+                    // Mechanism Rigidbodies are created by BuildArm/Buildelevator in Start(),
+                    // which may not have run yet for freshly spawned robots. The host sends
+                    // jointCount for the fully built robot — if our list is shorter, don't
+                    // cache it (use it for this packet only and rebuild next packet), or the
+                    // late-created joints would stay visually frozen for the whole match.
+                    if (filtered.Length >= jointCount)
+                        _cachedJointRbs[slot] = filtered;
                 }
-                filtered = _cachedJointRbs[slot];
+                else
+                {
+                    filtered = _cachedJointRbs[slot];
+                }
             }
             else
             {
@@ -844,12 +905,17 @@ using PlayMode = Util.PlayMode;
         {
             yield return waitFixed;
 
-            var mode = _loadMatch != null
-                ? (PlayMode)_loadMatch.GetSettingsCopy().playMode
-                : (PlayMode)_netPlayMode.Value;
             int first, last;
             if (LocalClientSlot >= 0) { first = LocalClientSlot; last = LocalClientSlot; }
-            else { (first, last) = ClientSlots(mode); }
+            else
+            {
+                // Legacy fallback only — GetSettingsCopy() allocates a MatchSettings clone,
+                // so avoid calling it at 50 Hz on the normal (LocalClientSlot set) path.
+                var mode = _loadMatch != null
+                    ? (PlayMode)_loadMatch.GetSettingsCopy().playMode
+                    : (PlayMode)_netPlayMode.Value;
+                (first, last) = ClientSlots(mode);
+            }
 
             // Drivetrain every FixedUpdate: SetNetworkDrive() is consumed once per physics frame
             // (_useNetworkDrive resets after use), so we must call it every tick or the robot
@@ -872,15 +938,24 @@ using PlayMode = Util.PlayMode;
         if (slot < 0 || _loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        var pi = robot.GetComponent<PlayerInput>();
-        if (pi == null) return;
 
-        var left  = pi.actions.FindAction("LeftStick")?.ReadValue<Vector2>()  ?? Vector2.zero;
-        var right = pi.actions.FindAction("RightStick")?.ReadValue<Vector2>() ?? Vector2.zero;
+        // Runs at 50 Hz — cache the resolved actions/components per robot instance.
+        if (!ReferenceEquals(_driveCacheRobot[slot], robot))
+        {
+            var pi = robot.GetComponent<PlayerInput>();
+            if (pi == null) return;
+            _driveCacheRobot[slot]  = robot;
+            _driveLeftAction[slot]  = pi.actions.FindAction("LeftStick");
+            _driveRightAction[slot] = pi.actions.FindAction("RightStick");
+            _driveSwerve[slot]      = robot.GetComponent<SwerveController>();
+        }
+
+        var left  = _driveLeftAction[slot]?.ReadValue<Vector2>()  ?? Vector2.zero;
+        var right = _driveRightAction[slot]?.ReadValue<Vector2>() ?? Vector2.zero;
 
         // The host's _isNetworkControlled path skips the reversed check in SwerveController,
         // so we must apply it here before sending — mirrors the local singleplayer path.
-        var swerve = robot.GetComponent<SwerveController>();
+        var swerve = _driveSwerve[slot];
         if (swerve != null && swerve.reversed)
             left = -left;
 
@@ -892,11 +967,6 @@ using PlayMode = Util.PlayMode;
         if (slot < 0 || _loadMatch == null) return;
         var robot = _loadMatch.GetRobotLoaded(slot);
         if (robot == null) return;
-        var pi = robot.GetComponent<PlayerInput>();
-        if (pi == null) return;
-
-        var actionMap = pi.actions.FindActionMap("Robot");
-        if (actionMap == null) return;
 
         // Rebuild if null OR empty: BuildArm.Start() adds JointControllers at runtime,
         // so the cache can be populated as an empty array before Start() runs.
@@ -905,13 +975,27 @@ using PlayMode = Util.PlayMode;
             _cachedJCs[slot]      = robot.GetComponentsInChildren<JointController>();
             _cachedBNs[slot]      = robot.GetComponentsInChildren<BuildNode>();
             _cachedAutoAims[slot] = robot.GetComponentsInChildren<AutoAim>();
+            if (slot == LocalClientSlot && _cachedJCs[slot].Length > 0)
+                DisconnectPredictionJoints(robot);
         }
 
         var jcs      = _cachedJCs[slot];
         var bns      = _cachedBNs[slot];
         var autoAims = _cachedAutoAims[slot];
 
-        ulong triggered = 0, held = 0;
+        // Triggered bits come EXCLUSIVELY from the Update()-time accumulator so each press
+        // is sent exactly once. Reading action.triggered here as well would re-send the same
+        // press whenever two mech polls land inside one render frame (input state refreshes
+        // only once per render frame), making Toggle/Tap actions double-fire on the host —
+        // the intake would deploy and instantly retract at low client frame rates.
+        //
+        // No local SetNetworkInput calls either: the client's own robot has its PlayerInput
+        // enabled, so JointController/BuildNode already read local input directly — feeding
+        // the same press back as network input one tick later double-toggled local state.
+        ulong triggered = _pendingClientTriggeredMask[slot];
+        _pendingClientTriggeredMask[slot] = 0;
+
+        ulong held = 0;
         int bit = 0;
 
         if (jcs != null) foreach (var jc in jcs)
@@ -919,17 +1003,9 @@ using PlayMode = Util.PlayMode;
             if (jc.setPoints == null) continue;
             for (int sp = 0; sp < jc.setPoints.Length && bit < 64; sp++, bit++)
             {
-                var spData = jc.setPoints[sp];
-                var ctrlAction = actionMap.FindAction(spData.controllerButton.ToString());
-                var kbAction   = actionMap.FindAction(spData.keyboardButton.ToString());
-
-                bool t = (ctrlAction?.triggered ?? false) || (kbAction?.triggered ?? false);
-                bool h = (ctrlAction?.IsPressed() ?? false) || (kbAction?.IsPressed() ?? false);
-
-                jc.SetNetworkInput(sp, t, h);
-
-                if (t) triggered |= 1UL << bit;
-                if (h) held      |= 1UL << bit;
+                bool h = (jc.GetControllerAction(sp)?.IsPressed() ?? false) ||
+                         (jc.GetKeyboardAction(sp)?.IsPressed() ?? false);
+                if (h) held |= 1UL << bit;
             }
         }
 
@@ -938,21 +1014,14 @@ using PlayMode = Util.PlayMode;
             if (bn.Actions == null) continue;
             for (int a = 0; a < bn.Actions.Length && bit < 64; a++, bit++)
             {
-                var action = bn.Actions[a];
-                if (!action.InputRequired)
+                if (!bn.Actions[a].InputRequired)
                 {
                     held |= 1UL << bit;
                     continue;
                 }
-                var ca = actionMap.FindAction(action.ControllerButton.ToString());
-                var ka = actionMap.FindAction(action.KeyboardButton.ToString());
-                bool t = (ca?.triggered ?? false) || (ka?.triggered ?? false);
-                bool h = (ca?.IsPressed() ?? false) || (ka?.IsPressed() ?? false);
-
-                bn.SetNetworkInput(a, t, h);
-
-                if (t) triggered |= 1UL << bit;
-                if (h) held      |= 1UL << bit;
+                bool h = (bn.GetControllerAction(a)?.IsPressed() ?? false) ||
+                         (bn.GetKeyboardAction(a)?.IsPressed() ?? false);
+                if (h) held |= 1UL << bit;
             }
         }
 
@@ -962,11 +1031,6 @@ using PlayMode = Util.PlayMode;
             if (aa.GetButtonHeld()) held |= 1UL << bit;
             bit++;
         }
-
-        // Flush triggers captured between polls (Update runs every frame, this runs every
-        // robotSyncEveryNFixed ticks — without this, Tap-type actions pressed mid-gap are lost).
-        triggered |= _pendingClientTriggeredMask[slot];
-        _pendingClientTriggeredMask[slot] = 0;
 
         // Always send so the server sees held=false when the button is released.
         SendRobotActionsServerRpc(slot, triggered, held);

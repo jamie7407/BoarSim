@@ -53,6 +53,49 @@ public class BuildNode : MonoBehaviour
         _netHeld[actionIdx] = held;
     }
 
+    // Resolved InputAction cache per action — avoids FindAction(enum.ToString()) allocating
+    // two strings per action per frame in Update. Actions is a fixed serialized array, so
+    // the cache is built once.
+    private InputAction[] _ctrlActions;
+    private InputAction[] _kbActions;
+
+    private void EnsureActionCache()
+    {
+        if (_ctrlActions != null || Actions == null) return;
+        if (_inputMap == null)
+        {
+            // Start() only resolves the map when Actions[0] needs input — resolve lazily
+            // here so later input-driven actions (and GameNetworkManager polling) work too.
+            _robotParent ??= Utils.FindParentPlayerInput(gameObject);
+            if (_robotParent == null) return;
+            _playerInput ??= _robotParent.GetComponent<PlayerInput>();
+            if (_playerInput == null) return;
+            _inputMap = _playerInput.actions.FindActionMap("Robot");
+            if (_inputMap == null) return;
+        }
+        _ctrlActions = new InputAction[Actions.Length];
+        _kbActions   = new InputAction[Actions.Length];
+        for (int i = 0; i < Actions.Length; i++)
+        {
+            if (!Actions[i].InputRequired) continue;
+            _ctrlActions[i] = _inputMap.FindAction(Actions[i].ControllerButton.ToString());
+            _kbActions[i]   = _inputMap.FindAction(Actions[i].KeyboardButton.ToString());
+        }
+    }
+
+    // Used by GameNetworkManager to poll this node's buttons without re-resolving actions.
+    public InputAction GetControllerAction(int actionIdx)
+    {
+        EnsureActionCache();
+        return _ctrlActions != null && actionIdx >= 0 && actionIdx < _ctrlActions.Length ? _ctrlActions[actionIdx] : null;
+    }
+
+    public InputAction GetKeyboardAction(int actionIdx)
+    {
+        EnsureActionCache();
+        return _kbActions != null && actionIdx >= 0 && actionIdx < _kbActions.Length ? _kbActions[actionIdx] : null;
+    }
+
     private void Start()
     {
         if (!Application.isPlaying) return;
@@ -188,8 +231,9 @@ public class BuildNode : MonoBehaviour
 
             if (action.InputRequired)
             {
-                var controllerAction = _inputMap.FindAction(action.ControllerButton.ToString());
-                var keyboardAction = _inputMap.FindAction(action.KeyboardButton.ToString());
+                EnsureActionCache();
+                var controllerAction = _ctrlActions != null ? _ctrlActions[i] : null;
+                var keyboardAction   = _kbActions   != null ? _kbActions[i]   : null;
 
                 if (controllerAction != null &&
                     controllerAction.triggered &&

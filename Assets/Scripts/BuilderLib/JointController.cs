@@ -68,6 +68,40 @@ public class JointController : MonoBehaviour
         _netHeld[spIdx] = held;                      // direct set: reflects current state from host
     }
 
+    // Resolved InputAction cache per setpoint — FindAction(enum.ToString()) allocates two
+    // strings per setpoint per frame otherwise. BuildArm reassigns the same setPoints array
+    // reference every frame, so a reference-equality check keeps the cache stable.
+    private InputAction[] _ctrlActions;
+    private InputAction[] _kbActions;
+    private SetPoint[] _actionCacheFor;
+
+    private void EnsureActionCache()
+    {
+        if (_inputMap == null || setPoints == null) return;
+        if (ReferenceEquals(_actionCacheFor, setPoints) && _ctrlActions != null) return;
+        _actionCacheFor = setPoints;
+        _ctrlActions = new InputAction[setPoints.Length];
+        _kbActions   = new InputAction[setPoints.Length];
+        for (int idx = 0; idx < setPoints.Length; idx++)
+        {
+            _ctrlActions[idx] = _inputMap.FindAction(setPoints[idx].controllerButton.ToString());
+            _kbActions[idx]   = _inputMap.FindAction(setPoints[idx].keyboardButton.ToString());
+        }
+    }
+
+    // Used by GameNetworkManager to poll this joint's buttons without re-resolving actions.
+    public InputAction GetControllerAction(int spIdx)
+    {
+        EnsureActionCache();
+        return _ctrlActions != null && spIdx >= 0 && spIdx < _ctrlActions.Length ? _ctrlActions[spIdx] : null;
+    }
+
+    public InputAction GetKeyboardAction(int spIdx)
+    {
+        EnsureActionCache();
+        return _kbActions != null && spIdx >= 0 && spIdx < _kbActions.Length ? _kbActions[spIdx] : null;
+    }
+
     [HideInInspector] public float p;
     [HideInInspector] public float i;
     [HideInInspector] public float d;
@@ -159,13 +193,16 @@ public class JointController : MonoBehaviour
         }
         
         if (follower) return;
-        
+
+        EnsureActionCache();
+        if (_ctrlActions == null) return; // input map not resolved yet
+
         for (int i = 0; i < setPoints.Length; i++)
         {
 
             var setPoint = setPoints[i];
-            var controllerAction = _inputMap.FindAction(setPoint.controllerButton.ToString());
-            var keyboardAction = _inputMap.FindAction(setPoint.keyboardButton.ToString());
+            var controllerAction = _ctrlActions[i];
+            var keyboardAction = _kbActions[i];
             var buttonPressed = false;
             if (controllerAction.triggered)
             {
